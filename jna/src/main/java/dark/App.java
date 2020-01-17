@@ -3,17 +3,22 @@ package dark;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import com.sun.jna.ptr.IntByReference;
+import org.bytedeco.opencv.opencv_core.Mat;
+
 
 import java.io.File;
 
 import static java.lang.System.out;
+import static org.bytedeco.opencv.global.opencv_imgcodecs.imread;
+
 
 public class App
 {
     network net;
     metadata meta;
     String[] altNames;
-    DarknetLib darknet = (DarknetLib) Native.load(new File(".").getAbsolutePath()+"/libdark.so", DarknetLib.class);
+    //DarknetLib darknet = (DarknetLib) Native.load(new File(".").getAbsolutePath()+"/libdark.so", DarknetLib.class);
+    DarknetLib darknet = (DarknetLib) Native.load(new File(".").getAbsolutePath()+"/dark.dll", DarknetLib.class);
 
     public static void main( String[] args ) {
         detection[] detections = new App().PerformDetect("data/dog.jpg",0.25f,"./cfg/yolov3.cfg","./cfg/yolov3.weights", "./cfg/coco.data",false);
@@ -28,7 +33,11 @@ public class App
 
     public detection[]  Detect(String filename, float thresh, float hier_thresh, float nms) {
         image im = darknet.load_image_color(filename, 0, 0);
+        Mat mat = imread(filename);
+
         detection[] ret = DetectImage(im, thresh, hier_thresh, nms);
+
+        Util.showImage(mat);
         darknet.free_image(im);
         return ret;
     }
@@ -52,7 +61,7 @@ public class App
             for (int i = 0; i < meta.classes; i++) {
                 if (probabilites[i] > 0) {
                     String nameTag = altNames[i];
-                    out.println("name:"+nameTag+"("+probabilites[i]+")");
+                    //out.println("name:"+nameTag+"("+probabilites[i]+")");
                 }
             }
         }
@@ -89,6 +98,7 @@ public class App
         float hier_thresh=.5f;
         float nms=.45f;
         detection[] detections = Detect(imagePath, thresh,hier_thresh,nms);
+        int success = darknet.dispose();
         return detections;
     }
 }
