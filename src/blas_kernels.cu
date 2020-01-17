@@ -576,6 +576,12 @@ extern "C" void simple_copy_ongpu(int size, float *src, float *dst)
     CHECK_CUDA(cudaPeekAtLastError());
 }
 
+extern "C" void memcpy_ongpu(void *dst, void *src, int size_bytes)
+{
+    CHECK_CUDA(cudaMemcpyAsync(dst, src, size_bytes, cudaMemcpyDefault, get_cuda_stream()));
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
 extern "C" void mul_ongpu(int N, float * X, int INCX, float * Y, int INCY)
 {
     mul_kernel<<<cuda_gridsize(N), BLOCK, 0, get_cuda_stream() >>>(N, X, INCX, Y, INCY);
@@ -665,6 +671,178 @@ extern "C" void supp_ongpu(int N, float ALPHA, float * X, int INCX)
 extern "C" void fill_ongpu(int N, float ALPHA, float * X, int INCX)
 {
     fill_kernel<<<cuda_gridsize(N), BLOCK, 0, get_cuda_stream()>>>(N, ALPHA, X, INCX);
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
+__device__ float relu(float src) {
+    if (src > 0) return src;
+    return 0;
+}
+
+__global__ void shortcut_multilayer_kernel(int size, int src_outputs, int batch, int n, int *outputs_of_layers_gpu, float **layers_output_gpu, float *out, float *in, float *weights_gpu, int nweights, WEIGHTS_NORMALIZATION_T weights_normalizion)
+{
+    const int id = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (id >= size) return;
+
+    // nweights - l.n or l.n*l.c or (l.n*l.c*l.h*l.w)
+    const int layer_step = nweights / (n + 1);    // 1 or l.c or (l.c * l.h * l.w)
+    int step = 0;
+    if (weights_gpu) step = src_outputs / layer_step; // (l.c * l.h * l.w) or (l.w*l.h) or 1
+
+    int src_id = id;
+    const int src_i = src_id % src_outputs;
+    src_id /= src_outputs;
+    int src_b = src_id;
+
+    float sum = 1, max_val = -INFINITY;
+    if (weights_gpu && weights_normalizion) {
+        if (weights_normalizion == SOFTMAX_NORMALIZATION) {
+            for (int i = 0; i < (n + 1); ++i) {
+                const int weights_index = src_i / step + i*layer_step;  // [0 or c or (c, h ,w)]
+                const float w = weights_gpu[weights_index];
+                if (max_val < w) max_val = w;
+            }
+        }
+        const float eps = 0.0001;
+        sum = eps;
+        for (int i = 0; i < (n + 1); ++i) {
+            const int weights_index = src_i / step + i*layer_step;  // [0 or c or (c, h ,w)]
+            const float w = weights_gpu[weights_index];
+            if (weights_normalizion == RELU_NORMALIZATION) sum += relu(w);
+            else if (weights_normalizion == SOFTMAX_NORMALIZATION) sum += expf(w - max_val);
+        }
+    }
+
+    if (weights_gpu) {
+        float w = weights_gpu[src_i / step];
+        if (weights_normalizion == RELU_NORMALIZATION) w = relu(w) / sum;
+        else if (weights_normalizion == SOFTMAX_NORMALIZATION) w = expf(w - max_val) / sum;
+
+        out[id] = in[id] * w; // [0 or c or (c, h ,w)]
+    }
+    else out[id] = in[id];
+
+    // layers
+    for (int i = 0; i < n; ++i) {
+        int add_outputs = outputs_of_layers_gpu[i];
+        if (src_i < add_outputs) {
+            int add_index = add_outputs*src_b + src_i;
+            int out_index = id;
+
+            float *add = layers_output_gpu[i];
+
+            if (weights_gpu) {
+                const int weights_index = src_i / step + (i + 1)*layer_step;  // [0 or c or (c, h ,w)]
+                float w = weights_gpu[weights_index];
+                if (weights_normalizion == RELU_NORMALIZATION) w = relu(w) / sum;
+                else if (weights_normalizion == SOFTMAX_NORMALIZATION) w = expf(w - max_val) / sum;
+
+                out[out_index] += add[add_index] * w; // [0 or c or (c, h ,w)]
+            }
+            else out[out_index] += add[add_index];
+        }
+    }
+}
+
+extern "C" void shortcut_multilayer_gpu(int src_outputs, int batch, int n, int *outputs_of_layers_gpu, float **layers_output_gpu, float *out, float *in, float *weights_gpu, int nweights, WEIGHTS_NORMALIZATION_T weights_normalizion)
+{
+    //printf(" src_outputs = %d, batch = %d, n = %d \n", src_outputs, batch, n);
+    int size = batch * src_outputs;
+    shortcut_multilayer_kernel << <cuda_gridsize(size), BLOCK, 0, get_cuda_stream() >> > (size, src_outputs, batch, n, outputs_of_layers_gpu, layers_output_gpu, out, in, weights_gpu, nweights, weights_normalizion);
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
+
+__global__ void backward_shortcut_multilayer_kernel(int size, int src_outputs, int batch, int n, int *outputs_of_layers_gpu,
+    float **layers_delta_gpu, float *delta_out, float *delta_in, float *weights_gpu, float *weight_updates_gpu, int nweights, float *in, float **layers_output_gpu, WEIGHTS_NORMALIZATION_T weights_normalizion)
+{
+    const int id = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (id >= size) return;
+
+    // nweights - l.n or l.n*l.c or (l.n*l.c*l.h*l.w)
+    const int layer_step = nweights / (n + 1);    // 1 or l.c or (l.c * l.h * l.w)
+    int step = 0;
+    if (weights_gpu) step = src_outputs / layer_step; // (l.c * l.h * l.w) or (l.w*l.h) or 1
+
+    int src_id = id;
+    const int src_i = src_id % src_outputs;
+    src_id /= src_outputs;
+    int src_b = src_id;
+
+    float grad = 1, sum = 1, max_val = -INFINITY;
+    int i;
+    if (weights_gpu && weights_normalizion) {
+        if (weights_normalizion == SOFTMAX_NORMALIZATION) {
+            for (int i = 0; i < (n + 1); ++i) {
+                const int weights_index = src_i / step + i*layer_step;  // [0 or c or (c, h ,w)]
+                float w = weights_gpu[weights_index];
+                if (max_val < w) max_val = w;
+            }
+        }
+        const float eps = 0.0001;
+        sum = eps;
+        for (i = 0; i < (n + 1); ++i) {
+            const int weights_index = src_i / step + i*layer_step;  // [0 or c or (c, h ,w)]
+            const float w = weights_gpu[weights_index];
+            if (weights_normalizion == RELU_NORMALIZATION) sum += relu(w);
+            else if (weights_normalizion == SOFTMAX_NORMALIZATION) sum += expf(w - max_val);
+        }
+
+        grad = 0;
+        for (i = 0; i < (n + 1); ++i) {
+            const int weights_index = src_i / step + i*layer_step;  // [0 or c or (c, h ,w)]
+            const float delta_w = delta_in[id] * in[id];
+            const float w = weights_gpu[weights_index];
+            if (weights_normalizion == RELU_NORMALIZATION) grad += delta_w * relu(w) / sum;
+            else if (weights_normalizion == SOFTMAX_NORMALIZATION) grad += delta_w * expf(w - max_val) / sum;
+        }
+    }
+
+    if (weights_gpu) {
+        float w = weights_gpu[src_i / step];
+        if (weights_normalizion == RELU_NORMALIZATION) w = relu(w) / sum;
+        else if (weights_normalizion == SOFTMAX_NORMALIZATION) w = expf(w - max_val) / sum;
+
+        delta_out[id] += delta_in[id] * w; // [0 or c or (c, h ,w)]
+        weight_updates_gpu[src_i / step] += delta_in[id] * in[id] * grad;
+    }
+    else delta_out[id] += delta_in[id];
+
+    // layers
+    for (int i = 0; i < n; ++i) {
+        int add_outputs = outputs_of_layers_gpu[i];
+        if (src_i < add_outputs) {
+            int add_index = add_outputs*src_b + src_i;
+            int out_index = id;
+
+            float *layer_delta = layers_delta_gpu[i];
+            if (weights_gpu) {
+                float *add = layers_output_gpu[i];
+
+                const int weights_index = src_i / step + (i + 1)*layer_step;  // [0 or c or (c, h ,w)]
+                float w = weights_gpu[weights_index];
+                if (weights_normalizion == RELU_NORMALIZATION) w = relu(w) / sum;
+                else if (weights_normalizion == SOFTMAX_NORMALIZATION) w = expf(w - max_val) / sum;
+
+                layer_delta[add_index] += delta_in[id] * w;
+                weight_updates_gpu[weights_index] += delta_in[id] * add[add_index] * grad;
+            }
+            else layer_delta[add_index] += delta_in[id];
+        }
+    }
+}
+
+extern "C" void backward_shortcut_multilayer_gpu(int src_outputs, int batch, int n, int *outputs_of_layers_gpu,
+    float **layers_delta_gpu, float *delta_out, float *delta_in, float *weights_gpu, float *weight_updates_gpu, int nweights, float *in, float **layers_output_gpu, WEIGHTS_NORMALIZATION_T weights_normalizion)
+{
+    const int layer_step = nweights / (n + 1);    // 1 or l.c or (l.c * l.h * l.w)
+    const int step = src_outputs / layer_step; // (l.c * l.h * l.w) or (l.w*l.h) or 1
+    //printf(" nweights = %d, n = %d, layer_step = %d, step = %d \n", nweights, n, layer_step, step);
+
+    //printf(" src_outputs = %d, batch = %d, n = %d \n", src_outputs, batch, n);
+    int size = batch * src_outputs;
+    backward_shortcut_multilayer_kernel << <cuda_gridsize(size), BLOCK, 0, get_cuda_stream() >> > (size, src_outputs, batch, n, outputs_of_layers_gpu,
+        layers_delta_gpu, delta_out, delta_in, weights_gpu, weight_updates_gpu, nweights, in, layers_output_gpu, weights_normalizion);
     CHECK_CUDA(cudaPeekAtLastError());
 }
 
@@ -1402,6 +1580,7 @@ __global__  void stretch_weights_kernel(const float *src_weight_gpu, float *weig
             //const float coef = (kernel_size*kernel_size) / (kernel_size*kernel_size - dropout_sum);
             for (int y = 0; y < kernel_size; ++y) {
                 for (int x = 0; x < kernel_size; ++x) {
+                    //if (scale < 1) weight_deform_gpu[x + y*kernel_size + i] /= scale;// *= coef;
                     weight_deform_gpu[x + y*kernel_size + i] /= scale;// *= coef;
                 }
             }
@@ -1419,11 +1598,6 @@ extern "C" void stretch_weights_gpu(const float *src_weight_gpu, float *weight_d
 
     CHECK_CUDA(cudaPeekAtLastError());
 }
-
-
-
-
-
 
 
 
@@ -1610,6 +1784,173 @@ extern "C" void rotate_weights_gpu(const float *src_weight_gpu, float *weight_de
     const int block_size = BLOCK;
     const int num_blocks = get_number_of_blocks(nweights / kernel_area, block_size);
     rotate_weights_kernel << <num_blocks, block_size, 0, get_cuda_stream() >> > (src_weight_gpu, weight_deform_gpu, nweights, n, size, reverse);
+
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
+
+
+__global__  void stretch_sway_flip_weights_kernel(const float *src_weight_gpu, float *weight_deform_gpu, int nweights, int n, int kernel_size, float angle, int reverse)
+{
+    const int index = blockIdx.x*blockDim.x + threadIdx.x;
+    const int kernel_area = kernel_size * kernel_size;
+    const int i = index * kernel_area;
+
+    const int stage_step = (nweights / kernel_area) / 8;  // 8 stages
+    const int stage_id = index / stage_step;
+
+    // nweights = (c / groups) * n * size * size;
+    // kernel_area = size*size
+
+    if (i < nweights)
+    {
+
+        if (stage_id == 0) {
+            // simple copy
+            for (int x = 0; x < kernel_size; ++x) {
+                for (int y = 0; y < kernel_size; ++y) {
+                    weight_deform_gpu[x + y*kernel_size + i] = src_weight_gpu[x + y*kernel_size + i];
+                }
+            }
+        }
+        else if (stage_id == 1 || stage_id == 2 || stage_id == 3 || stage_id == 4)
+        {
+            float scale = 0.5;
+            if (stage_id == 1) scale = 0.65;
+            else if (stage_id == 2) scale = 0.8;
+            else if (stage_id == 3) scale = 1.2;
+            else if (stage_id == 4) scale = 1.4;
+
+            if (reverse) scale = 1 / scale;
+
+            const int x_c = kernel_size / 2;
+            const int y_c = kernel_size / 2;
+
+            float dropout_sum = 0;
+
+            for (int y = 0; y < kernel_size; ++y) {
+                for (int x = 0; x < kernel_size; ++x) {
+                    // Xsource = x_c + (x_d - x_c) / scale
+                    // Ysource = y_c + (y_d - y_c) / scale
+
+                    float x_s = x_c + (x - x_c) / scale;
+                    float y_s = y_c + (y - y_c) / scale;
+
+                    int x_0 = floor(x_s);   // round down
+                    int x_1 = ceil(x_s);    // round up
+                    if (x_0 == x_1) x_1 = x_0 + 1;
+                    int y_0 = floor(y_s);
+                    int y_1 = ceil(y_s);
+                    if (y_0 == y_1) y_1 = y_0 + 1;
+
+                    float c_x_0 = x_1 - x_s;
+                    float c_x_1 = x_s - x_0;
+                    float c_y_0 = y_1 - y_s;
+                    float c_y_1 = y_s - y_0;
+
+                    float val = 0;
+                    if (x_0 >= 0 && x_0 < kernel_size && y_0 >= 0 && y_0 < kernel_size) val += src_weight_gpu[x_0 + y_0*kernel_size + i] * c_x_0 * c_y_0;
+                    else dropout_sum += c_x_0 * c_y_0;
+
+                    if (x_1 >= 0 && x_1 < kernel_size && y_0 >= 0 && y_0 < kernel_size) val += src_weight_gpu[x_1 + y_0*kernel_size + i] * c_x_1 * c_y_0;
+                    else dropout_sum += c_x_1 * c_y_0;
+
+                    if (x_0 >= 0 && x_0 < kernel_size && y_1 >= 0 && y_1 < kernel_size) val += src_weight_gpu[x_0 + y_1*kernel_size + i] * c_x_0 * c_y_1;
+                    else dropout_sum += c_x_0 * c_y_1;
+
+                    if (x_1 >= 0 && x_1 < kernel_size && y_1 >= 0 && y_1 < kernel_size) val += src_weight_gpu[x_1 + y_1*kernel_size + i] * c_x_1 * c_y_1;
+                    else dropout_sum += c_x_1 * c_y_1;
+
+                    weight_deform_gpu[x + y*kernel_size + i] = val;
+                }
+            }
+
+            // compensate for dropped items
+            //const float coef = (kernel_size*kernel_size) / (kernel_size*kernel_size - dropout_sum);
+            for (int y = 0; y < kernel_size; ++y) {
+                for (int x = 0; x < kernel_size; ++x) {
+                    if(scale > 1)
+                        weight_deform_gpu[x + y*kernel_size + i] /= scale;// *= coef;
+                }
+            }
+        }
+        else if (stage_id == 5 || stage_id == 6)
+        {
+            // rotate left or right
+            if (stage_id == 6) angle = -angle;
+            if (reverse) angle = -angle;
+
+            const float cos_a = cosf(angle * 3.14159265 / 180);
+            const float sin_a = sinf(angle * 3.14159265 / 180);
+            const int x_c = kernel_size / 2;
+            const int y_c = kernel_size / 2;
+
+            float dropout_sum = 0;
+
+            for (int y = 0; y < kernel_size; ++y) {
+                for (int x = 0; x < kernel_size; ++x) {
+                    // Xsource = x*cos(alpha) + y*sin(alpha)
+                    // Ysource = -x*sin(alpha) + y*cos(alpha)
+
+                    float x_s = x_c + (x - x_c)*cos_a + (y - y_c)*sin_a;
+                    float y_s = y_c - (x - x_c)*sin_a + (y - y_c)*cos_a;
+
+                    int x_0 = floor(x_s);   // round down
+                    int x_1 = ceil(x_s);    // round up
+                    if (x_0 == x_1) x_1 = x_0 + 1;
+                    int y_0 = floor(y_s);
+                    int y_1 = ceil(y_s);
+                    if (y_0 == y_1) y_1 = y_0 + 1;
+
+                    float c_x_0 = x_1 - x_s;
+                    float c_x_1 = x_s - x_0;
+                    float c_y_0 = y_1 - y_s;
+                    float c_y_1 = y_s - y_0;
+
+                    float val = 0;
+                    if (x_0 >= 0 && x_0 < kernel_size && y_0 >= 0 && y_0 < kernel_size) val += src_weight_gpu[x_0 + y_0*kernel_size + i] * c_x_0 * c_y_0;
+                    else dropout_sum += c_x_0 * c_y_0;
+
+                    if (x_1 >= 0 && x_1 < kernel_size && y_0 >= 0 && y_0 < kernel_size) val += src_weight_gpu[x_1 + y_0*kernel_size + i] * c_x_1 * c_y_0;
+                    else dropout_sum += c_x_1 * c_y_0;
+
+                    if (x_0 >= 0 && x_0 < kernel_size && y_1 >= 0 && y_1 < kernel_size) val += src_weight_gpu[x_0 + y_1*kernel_size + i] * c_x_0 * c_y_1;
+                    else dropout_sum += c_x_0 * c_y_1;
+
+                    if (x_1 >= 0 && x_1 < kernel_size && y_1 >= 0 && y_1 < kernel_size) val += src_weight_gpu[x_1 + y_1*kernel_size + i] * c_x_1 * c_y_1;
+                    else dropout_sum += c_x_1 * c_y_1;
+
+                    weight_deform_gpu[x + y*kernel_size + i] = val;
+                }
+            }
+
+            // compensate for dropped items
+            const float coef = (kernel_size*kernel_size) / (kernel_size*kernel_size - dropout_sum);
+            for (int y = 0; y < kernel_size; ++y) {
+                for (int x = 0; x < kernel_size; ++x) {
+                    weight_deform_gpu[x + y*kernel_size + i] *= coef;
+                }
+            }
+        }
+        else if (stage_id == 7)
+        {
+            // flip
+            for (int y = 0; y < kernel_size; ++y) {
+                for (int x = 0; x < kernel_size; ++x) {
+                    weight_deform_gpu[(kernel_size - x - 1) + y*kernel_size + i] = src_weight_gpu[x + y*kernel_size + i];
+                }
+            }
+        }
+    }
+}
+
+
+extern "C" void stretch_sway_flip_weights_gpu(const float *src_weight_gpu, float *weight_deform_gpu, int nweights, int n, int size, int angle, int reverse)
+{
+    const int kernel_area = size*size;
+    const int block_size = BLOCK;
+    const int num_blocks = get_number_of_blocks(nweights / kernel_area, block_size);
+    stretch_sway_flip_weights_kernel << <num_blocks, block_size, 0, get_cuda_stream() >> > (src_weight_gpu, weight_deform_gpu, nweights, n, size, angle, reverse);
 
     CHECK_CUDA(cudaPeekAtLastError());
 }
