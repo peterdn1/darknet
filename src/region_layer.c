@@ -20,6 +20,10 @@ region_layer make_region_layer(int batch, int w, int h, int n, int classes, int 
     l.batch = batch;
     l.h = h;
     l.w = w;
+    l.c = n*(classes + coords + 1);
+    l.out_w = l.w;
+    l.out_h = l.h;
+    l.out_c = l.c;
     l.classes = classes;
     l.coords = coords;
     l.cost = (float*)xcalloc(1, sizeof(float));
@@ -28,7 +32,8 @@ region_layer make_region_layer(int batch, int w, int h, int n, int classes, int 
     l.outputs = h*w*n*(classes + coords + 1);
     l.inputs = l.outputs;
     l.max_boxes = max_boxes;
-    l.truths = max_boxes*(5);
+    l.truth_size = 4 + 2;
+    l.truths = max_boxes*l.truth_size;
     l.delta = (float*)xcalloc(batch * l.outputs, sizeof(float));
     l.output = (float*)xcalloc(batch * l.outputs, sizeof(float));
     int i;
@@ -67,7 +72,8 @@ void resize_region_layer(layer *l, int w, int h)
     l->delta = (float*)xrealloc(l->delta, l->batch * l->outputs * sizeof(float));
 
 #ifdef GPU
-    if (old_w < w || old_h < h) {
+    //if (old_w < w || old_h < h)
+    {
         cuda_free(l->delta_gpu);
         cuda_free(l->output_gpu);
 
@@ -225,9 +231,9 @@ void forward_region_layer(const region_layer l, network_state state)
         if(l.softmax_tree){
             int onlyclass_id = 0;
             for(t = 0; t < l.max_boxes; ++t){
-                box truth = float_to_box(state.truth + t*5 + b*l.truths);
+                box truth = float_to_box(state.truth + t*l.truth_size + b*l.truths);
                 if(!truth.x) break; // continue;
-                int class_id = state.truth[t*5 + b*l.truths + 4];
+                int class_id = state.truth[t*l.truth_size + b*l.truths + 4];
                 float maxp = 0;
                 int maxi = 0;
                 if(truth.x > 100000 && truth.y > 100000){
@@ -257,13 +263,13 @@ void forward_region_layer(const region_layer l, network_state state)
                     float best_iou = 0;
                     int best_class_id = -1;
                     for(t = 0; t < l.max_boxes; ++t){
-                        box truth = float_to_box(state.truth + t*5 + b*l.truths);
-                        int class_id = state.truth[t * 5 + b*l.truths + 4];
+                        box truth = float_to_box(state.truth + t*l.truth_size + b*l.truths);
+                        int class_id = state.truth[t * l.truth_size + b*l.truths + 4];
                         if (class_id >= l.classes) continue; // if label contains class_id more than number of classes in the cfg-file
                         if(!truth.x) break; // continue;
                         float iou = box_iou(pred, truth);
                         if (iou > best_iou) {
-                            best_class_id = state.truth[t*5 + b*l.truths + 4];
+                            best_class_id = state.truth[t*l.truth_size + b*l.truths + 4];
                             best_iou = iou;
                         }
                     }
@@ -296,10 +302,10 @@ void forward_region_layer(const region_layer l, network_state state)
             }
         }
         for(t = 0; t < l.max_boxes; ++t){
-            box truth = float_to_box(state.truth + t*5 + b*l.truths);
-            int class_id = state.truth[t * 5 + b*l.truths + 4];
+            box truth = float_to_box(state.truth + t*l.truth_size + b*l.truths);
+            int class_id = state.truth[t * l.truth_size + b*l.truths + 4];
             if (class_id >= l.classes) {
-                printf(" Warning: in txt-labels class_id=%d >= classes=%d in cfg-file. In txt-labels class_id should be [from 0 to %d] \n", class_id, l.classes, l.classes-1);
+                printf("\n Warning: in txt-labels class_id=%d >= classes=%d in cfg-file. In txt-labels class_id should be [from 0 to %d] \n", class_id, l.classes, l.classes-1);
                 getchar();
                 continue; // if label contains class_id more than number of classes in the cfg-file
             }

@@ -1,6 +1,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+int cuda_debug_sync = 0;
 int gpu_index = 0;
 #ifdef __cplusplus
 }
@@ -19,6 +20,7 @@ int gpu_index = 0;
 
 #pragma comment(lib, "cuda.lib")
 
+
 #ifdef CUDNN
 #ifndef USE_CMAKE_LIBS
 #pragma comment(lib, "cudnn.lib")
@@ -28,6 +30,7 @@ int gpu_index = 0;
 #if defined(CUDNN_HALF) && !defined(CUDNN)
 #error "If you set CUDNN_HALF=1 then you must set CUDNN=1"
 #endif
+
 
 void cuda_set_device(int n)
 {
@@ -59,7 +62,7 @@ void check_error(cudaError_t status)
     {
         const char *s = cudaGetErrorString(status);
         char buffer[256];
-        printf("CUDA Error: %s\n", s);
+        printf("\n CUDA Error: %s\n", s);
         snprintf(buffer, 256, "CUDA Error: %s", s);
 #ifdef WIN32
         getchar();
@@ -70,7 +73,7 @@ void check_error(cudaError_t status)
     {
         const char *s = cudaGetErrorString(status2);
         char buffer[256];
-        printf("CUDA Error Prev: %s\n", s);
+        printf("\n CUDA Error Prev: %s\n", s);
         snprintf(buffer, 256, "CUDA Error Prev: %s", s);
 #ifdef WIN32
         getchar();
@@ -86,10 +89,13 @@ void check_error_extended(cudaError_t status, const char *file, int line, const 
         check_error(status);
     }
 #if defined(DEBUG) || defined(CUDA_DEBUG)
-    status = cudaDeviceSynchronize();
-    if (status != cudaSuccess)
-        printf("CUDA status = cudaDeviceSynchronize() Error: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    cuda_debug_sync = 1;
 #endif
+    if (cuda_debug_sync) {
+        status = cudaDeviceSynchronize();
+        if (status != cudaSuccess)
+            printf("CUDA status = cudaDeviceSynchronize() Error: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    }
     check_error(status);
 }
 
@@ -116,14 +122,17 @@ static int streamInit[16] = { 0 };
 cudaStream_t get_cuda_stream() {
     int i = cuda_get_device();
     if (!streamInit[i]) {
-        //printf("Create CUDA-stream \n");
+        printf("Create CUDA-stream - %d \n", i);
+#ifdef CUDNN
+        cudaError_t status = cudaStreamCreateWithFlags(&streamsArray[i], cudaStreamNonBlocking);
+#else
         cudaError_t status = cudaStreamCreate(&streamsArray[i]);
-        //cudaError_t status = cudaStreamCreateWithFlags(&streamsArray[i], cudaStreamNonBlocking);
+#endif
         if (status != cudaSuccess) {
             printf(" cudaStreamCreate error: %d \n", status);
             const char *s = cudaGetErrorString(status);
             printf("CUDA Error: %s\n", s);
-            status = cudaStreamCreateWithFlags(&streamsArray[i], cudaStreamDefault);
+            status = cudaStreamCreateWithFlags(&streamsArray[i], cudaStreamNonBlocking);    // cudaStreamDefault
             CHECK_CUDA(status);
         }
         streamInit[i] = 1;
@@ -131,40 +140,44 @@ cudaStream_t get_cuda_stream() {
     return streamsArray[i];
 }
 
+/*
 static cudaStream_t streamsArray2[16];    // cudaStreamSynchronize( get_cuda_memcpy_stream() );
 static int streamInit2[16] = { 0 };
 
 cudaStream_t get_cuda_memcpy_stream() {
     int i = cuda_get_device();
     if (!streamInit2[i]) {
-        cudaError_t status = cudaStreamCreate(&streamsArray2[i]);
-        //cudaError_t status = cudaStreamCreateWithFlags(&streamsArray2[i], cudaStreamNonBlocking);
+        printf(" Create COPY stream %d \n", i);
+        //cudaError_t status = cudaStreamCreate(&streamsArray2[i], cudaStreamNonBlocking);
+        cudaError_t status = cudaStreamCreateWithFlags(&streamsArray2[i], cudaStreamNonBlocking);
         if (status != cudaSuccess) {
             printf(" cudaStreamCreate-Memcpy error: %d \n", status);
             const char *s = cudaGetErrorString(status);
             printf("CUDA Error: %s\n", s);
-            status = cudaStreamCreateWithFlags(&streamsArray2[i], cudaStreamDefault);
+            status = cudaStreamCreateWithFlags(&streamsArray2[i], cudaStreamNonBlocking);
             CHECK_CUDA(status);
         }
         streamInit2[i] = 1;
     }
     return streamsArray2[i];
 }
-
+*/
 
 #ifdef CUDNN
+static int cudnnInit[16] = { 0 };
+static cudnnHandle_t cudnnHandle[16];
+
 cudnnHandle_t cudnn_handle()
 {
-    static int init[16] = {0};
-    static cudnnHandle_t handle[16];
     int i = cuda_get_device();
-    if(!init[i]) {
-        cudnnCreate(&handle[i]);
-        init[i] = 1;
-        cudnnStatus_t status = cudnnSetStream(handle[i], get_cuda_stream());
+    if(!cudnnInit[i]) {
+        cudnnCreate(&cudnnHandle[i]);
+        cudnnInit[i] = 1;
+        cudnnStatus_t status = cudnnSetStream(cudnnHandle[i], get_cuda_stream());
         CHECK_CUDNN(status);
+        printf(" Create cudnn-handle %d \n", i);
     }
-    return handle[i];
+    return cudnnHandle[i];
 }
 
 
@@ -173,6 +186,9 @@ void cudnn_check_error(cudnnStatus_t status)
 #if defined(DEBUG) || defined(CUDA_DEBUG)
     cudaDeviceSynchronize();
 #endif
+    if (cuda_debug_sync) {
+        cudaDeviceSynchronize();
+    }
     cudnnStatus_t status2 = CUDNN_STATUS_SUCCESS;
 #ifdef CUDNN_ERRQUERY_RAWCODE
     cudnnStatus_t status_tmp = cudnnQueryRuntimeError(cudnn_handle(), &status2, CUDNN_ERRQUERY_RAWCODE, NULL);
@@ -181,7 +197,7 @@ void cudnn_check_error(cudnnStatus_t status)
     {
         const char *s = cudnnGetErrorString(status);
         char buffer[256];
-        printf("cuDNN Error: %s\n", s);
+        printf("\n cuDNN Error: %s\n", s);
         snprintf(buffer, 256, "cuDNN Error: %s", s);
 #ifdef WIN32
         getchar();
@@ -192,7 +208,7 @@ void cudnn_check_error(cudnnStatus_t status)
     {
         const char *s = cudnnGetErrorString(status2);
         char buffer[256];
-        printf("cuDNN Error Prev: %s\n", s);
+        printf("\n cuDNN Error Prev: %s\n", s);
         snprintf(buffer, 256, "cuDNN Error Prev: %s", s);
 #ifdef WIN32
         getchar();
@@ -208,27 +224,143 @@ void cudnn_check_error_extended(cudnnStatus_t status, const char *file, int line
         cudnn_check_error(status);
     }
 #if defined(DEBUG) || defined(CUDA_DEBUG)
-    status = cudaDeviceSynchronize();
-    if (status != CUDNN_STATUS_SUCCESS)
-        printf("\n cuDNN status = cudaDeviceSynchronize() Error in: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    cuda_debug_sync = 1;
 #endif
+    if (cuda_debug_sync) {
+        cudaError_t status = cudaDeviceSynchronize();
+        if (status != CUDNN_STATUS_SUCCESS)
+            printf("\n cudaError_t status = cudaDeviceSynchronize() Error in: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    }
     cudnn_check_error(status);
 }
+
+static cudnnHandle_t switchCudnnHandle[16];
+static int switchCudnnInit[16];
 #endif
+
+
+void cublas_check_error(cublasStatus_t status)
+{
+#if defined(DEBUG) || defined(CUDA_DEBUG)
+    cudaDeviceSynchronize();
+#endif
+    if (cuda_debug_sync) {
+        cudaDeviceSynchronize();
+    }
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("cuBLAS Error\n");
+    }
+}
+
+void cublas_check_error_extended(cublasStatus_t status, const char *file, int line, const char *date_time)
+{
+    if (status != CUBLAS_STATUS_SUCCESS) {
+      printf("\n cuBLAS status Error in: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    }
+#if defined(DEBUG) || defined(CUDA_DEBUG)
+    cuda_debug_sync = 1;
+#endif
+    if (cuda_debug_sync) {
+        cudaError_t status = cudaDeviceSynchronize();
+      if (status != CUDA_SUCCESS)
+          printf("\n cudaError_t status = cudaDeviceSynchronize() Error in: file: %s() : line: %d : build time: %s \n", file, line, date_time);
+    }
+    cublas_check_error(status);
+}
+
+static int blasInit[16] = { 0 };
+static cublasHandle_t blasHandle[16];
 
 cublasHandle_t blas_handle()
 {
-    static int init[16] = {0};
-    static cublasHandle_t handle[16];
     int i = cuda_get_device();
-    if(!init[i]) {
-        cublasCreate(&handle[i]);
-        cublasStatus_t status = cublasSetStream(handle[i], get_cuda_stream());
-        CHECK_CUDA((cudaError_t)status);
-        init[i] = 1;
+    if (!blasInit[i]) {
+        CHECK_CUBLAS(cublasCreate(&blasHandle[i]));
+        cublasStatus_t status = cublasSetStream(blasHandle[i], get_cuda_stream());
+        CHECK_CUBLAS(status);
+        blasInit[i] = 1;
     }
-    return handle[i];
+    return blasHandle[i];
 }
+
+
+static int switchBlasInit[16] = { 0 };
+static cublasHandle_t switchBlasHandle[16];
+
+static cudaStream_t switchStreamsArray[16];
+static int switchStreamInit[16] = { 0 };
+
+cudaStream_t switch_stream(int i) {
+    int dev_id = cuda_get_device();
+
+    //printf(" switch_stream = %d \n", i);
+    if (!switchStreamInit[i]) {
+        CHECK_CUDA(cudaStreamCreateWithFlags(&switchStreamsArray[i], cudaStreamNonBlocking));
+        switchStreamInit[i] = 1;
+        printf(" Create stream %d \n", i);
+    }
+
+    //cudaStreamQuery(streamsArray[0]);   // Flush previous stream queue
+    streamsArray[dev_id] = switchStreamsArray[i];
+    streamInit[dev_id] = switchStreamInit[i];
+
+    //printf("switch_stream %d - get_cuda_stream() = %d \n", i, get_cuda_stream());
+
+    /*
+    if (!switchBlasInit[i]) {
+        CHECK_CUDA( cublasCreate(&switchBlasHandle[i]) );
+        switchBlasInit[i] = 1;
+        CHECK_CUDA( cublasSetStream(switchBlasHandle[i], switchStreamsArray[i]) );
+        printf(" Create blas-handle %d \n", i);
+    }
+    blasHandle[dev_id] = switchBlasHandle[i];
+    blasInit[dev_id] = switchBlasInit[i];
+    */
+
+#ifdef CUDNN
+    if (!switchCudnnInit[i]) {
+        CHECK_CUDNN( cudnnCreate(&switchCudnnHandle[i]) );
+        switchCudnnInit[i] = 1;
+        CHECK_CUDNN(cudnnSetStream(switchCudnnHandle[i], switchStreamsArray[i]));
+        printf(" Create cudnn-handle %d \n", i);
+    }
+    cudnnHandle[dev_id] = switchCudnnHandle[i];
+    cudnnInit[dev_id] = switchCudnnInit[i];
+#endif
+
+    return switchStreamsArray[i];
+}
+
+#ifndef cudaEventWaitDefault
+#define cudaEventWaitDefault 0x00
+#endif // cudaEventWaitDefault
+
+static const int max_events = 1024;
+static cudaEvent_t switchEventsArray[1024];
+static volatile int event_counter = 0;
+
+void wait_stream(int i) {
+    int dev_id = cuda_get_device();
+    if (event_counter >= max_events) error("CUDA max_events exceeded \n");
+
+    CHECK_CUDA( cudaEventCreateWithFlags(&switchEventsArray[event_counter], cudaEventDisableTiming) );
+    //printf(" create event = %d (wait for stream = %d) \n", event_counter, i);
+
+    //CHECK_CUDA(cudaEventRecordWithFlags(switchEventsArray[i], switchStreamsArray[i], cudaEventRecordExternal) );
+    CHECK_CUDA( cudaEventRecord(switchEventsArray[event_counter], switchStreamsArray[i]) );
+    CHECK_CUDA( cudaStreamWaitEvent(streamsArray[dev_id], switchEventsArray[event_counter], cudaEventWaitDefault) );
+    //cudaStreamWaitEvent(streamsArray[dev_id], switchEventsArray[i], cudaEventWaitExternal);
+    event_counter++;
+}
+
+void reset_wait_stream_events() {
+    int i;
+    for (i = 0; i < event_counter; ++i) {
+        CHECK_CUDA(cudaEventDestroy(switchEventsArray[i]));
+    }
+    event_counter = 0;
+}
+
 
 static float **pinned_ptr = NULL;
 static size_t pinned_num_of_blocks = 0;
@@ -453,7 +585,7 @@ void cuda_push_array(float *x_gpu, float *x, size_t n)
 {
     size_t size = sizeof(float)*n;
     //cudaError_t status = cudaMemcpy(x_gpu, x, size, cudaMemcpyHostToDevice);
-    cudaError_t status = cudaMemcpyAsync(x_gpu, x, size, cudaMemcpyDefault, get_cuda_stream());
+    cudaError_t status = cudaMemcpyAsync(x_gpu, x, size, cudaMemcpyHostToDevice, get_cuda_stream());
     CHECK_CUDA(status);
 }
 
@@ -461,7 +593,8 @@ void cuda_pull_array(float *x_gpu, float *x, size_t n)
 {
     size_t size = sizeof(float)*n;
     //cudaError_t status = cudaMemcpy(x, x_gpu, size, cudaMemcpyDeviceToHost);
-    cudaError_t status = cudaMemcpyAsync(x, x_gpu, size, cudaMemcpyDefault, get_cuda_stream());
+    //printf("cuda_pull_array - get_cuda_stream() = %d \n", get_cuda_stream());
+    cudaError_t status = cudaMemcpyAsync(x, x_gpu, size, cudaMemcpyDeviceToHost, get_cuda_stream());
     CHECK_CUDA(status);
     cudaStreamSynchronize(get_cuda_stream());
 }
@@ -479,12 +612,13 @@ int get_number_of_blocks(int array_size, int block_size)
     return array_size / block_size + ((array_size % block_size > 0) ? 1 : 0);
 }
 
-int get_gpu_compute_capability(int i)
+int get_gpu_compute_capability(int i, char *device_name)
 {
     typedef struct cudaDeviceProp cudaDeviceProp;
     cudaDeviceProp prop;
     cudaError_t status = cudaGetDeviceProperties(&prop, i);
     CHECK_CUDA(status);
+    if (device_name) strcpy(device_name, prop.name);
     int cc = prop.major * 100 + prop.minor * 10;    // __CUDA_ARCH__ format
     return cc;
 }
@@ -495,7 +629,7 @@ void show_cuda_cudnn_info()
     CHECK_CUDA(cudaRuntimeGetVersion(&cuda_version));
     CHECK_CUDA(cudaDriverGetVersion(&cuda_driver_version));
     fprintf(stderr, " CUDA-version: %d (%d)", cuda_version, cuda_driver_version);
-    if(cuda_version < cuda_driver_version) fprintf(stderr, "\n Warning: CUDA-version is lower than Driver-version! \n");
+    if(cuda_version > cuda_driver_version) fprintf(stderr, "\n Warning: CUDA-version is higher than Driver-version! \n");
 #ifdef CUDNN
     fprintf(stderr, ", cuDNN: %d.%d.%d", CUDNN_MAJOR, CUDNN_MINOR, CUDNN_PATCHLEVEL);
 #endif  // CUDNN

@@ -148,6 +148,18 @@ float box_union(box a, box b)
     return u;
 }
 
+float box_iou_kind(box a, box b, IOU_LOSS iou_kind)
+{
+    //IOU, GIOU, MSE, DIOU, CIOU
+    switch(iou_kind) {
+        case IOU: return box_iou(a, b);
+        case GIOU: return box_giou(a, b);
+        case DIOU: return box_diou(a, b);
+        case CIOU: return box_ciou(a, b);
+    }
+    return box_iou(a, b);
+}
+
 float box_iou(box a, box b)
 {
     //return box_intersection(a, b)/box_union(a, b);
@@ -901,7 +913,7 @@ void diounms_sort(detection *dets, int total, int classes, float thresh, NMS_KIN
                     */
                     dets[j].prob[k] = 0;
                 }
-                else if (box_iou(a, b) > thresh && nms_kind == GREEDY_NMS) {
+                else if (box_diou(a, b) > thresh && nms_kind == GREEDY_NMS) {
                     dets[j].prob[k] = 0;
                 }
                 else {
