@@ -3,29 +3,41 @@ package dark;
 import com.sun.jna.Pointer;
 import com.sun.jna.Structure;
 
+import jdk.internal.vm.compiler.word.PointerBase;
+
 import java.util.Arrays;
 import java.util.List;
 
-        //box bbox;0
-        //int classes;16
-        //float *prob;24
-        //float *mask;32
-        //float objectness;36
-        //int sort_class;40
-        //float *uc; // Gaussian_YOLOv3 - tx,ty,tw,th uncertainty 48
-        //int points; // bit-0 - center, bit-1 - top-left-corner, bit-2 - bottom-right-corner 52
-
 public class detection extends Structure   {
+        /*
+        typedef struct detection{
+            box bbox;
+            int classes;
+            float *prob;
+            float *mask;
+            float objectness;
+            int sort_class;
+            float *uc; // Gaussian_YOLOv3 - tx,ty,tw,th uncertainty
+            int points; // bit-0 - center, bit-1 - top-left-corner, bit-2 - bottom-right-corner
+            float *embeddings;  // embeddings for tracking
+            int embedding_size;
+            float sim;
+            int track_id;
+        } detection;
+        */
 
-    public box.ByValue bbox;//16 (float, float, float,float) (4x4 bytes)16
-    public int classes;//20 (4 bytes)
-    public Pointer prob;//28 (8 bytes)
-    public Pointer mask;//36 ((8 bytes)
-    public float objectness; //40 (4 bytes)
-    public int sort_class; //44 (4 bytes)
-    public Pointer uc;//float // Gaussian_YOLOv3 - tx,ty,tw,th uncertainty //52 (8 bytes)
-    public int points; // bit-0 - center, bit-1 - top-left-corner, bit-2 - bottom-right-corner //56 (4 bytes)
-    //60 + 4
+        public box.ByValue bbox;
+        public int classes;
+        public Pointer prob; //float*
+        public Pointer mask; //float*
+        public float objectness;
+        public int sort_class;
+        public Pointer uc; //float*
+        public int points;
+        public Pointer embeddings; //float*
+        public int embedding_size;
+        public float sim;
+        public int track_id;
 
     public detection() {
         super();
@@ -45,7 +57,8 @@ public class detection extends Structure   {
 
     @Override
     protected List<String> getFieldOrder() {
-        return Arrays.asList("bbox", "classes", "prob", "mask", "objectness", "sort_class", "uc", "points");
+        return Arrays.asList("bbox", "classes", "prob", "mask", "objectness", "sort_class", "uc",
+        "points", "embeddings", "embedding_size", "sim", "track_id");
     }
 
 

@@ -47,7 +47,9 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
     list *options = read_data_cfg(datacfg);
     char *train_images = option_find_str(options, "train", "data/train.txt");
     char *valid_images = option_find_str(options, "valid", train_images);
+    char *log = option_find_str(options, "log", NULL);
     char *backup_directory = option_find_str(options, "backup", "/backup/");
+    FILE *log_file = NULL;
 
     network net_map;
     if (calc_map)
@@ -220,6 +222,8 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
     int count = 0;
     double time_remaining, avg_time = -1, alpha_time = 0.01;
 
+    bool checked_log = false;
+
     //while(i*imgs < N*120){
     while (get_current_iteration(net) < net.max_batches && !g_finish_training_prematurely)
     {
@@ -354,6 +358,37 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
         }
         printf("\n %d: %f, %f avg loss, %f rate, %lf seconds, %d images, %f hours left\n", iteration, loss, avg_loss, get_current_rate(net), (what_time_is_it_now() - time), iteration * imgs, avg_time);
         fflush(stdout);
+
+        if (log && !checked_log) //where log is to be NULL (not specified) for no logging
+        {
+            //check if the file exists so we can know whether or not to add identifying information; note this assumes that the file is not empty.
+            log_file = fopen(log, "r");
+            const bool file_exists = log_file;
+
+            if (log_file)
+                fclose(log_file);
+
+            log_file = fopen(log, "a");
+
+            if (log_file)
+            {
+                if (!file_exists)
+                    fprintf(log_file, "Iteration,avg. loss,MAP\n");
+            }
+            else
+            {
+                fprintf(stderr, "Failed to create new log file with name %s\n", log);
+                fflush(stderr);
+            }
+
+            checked_log = true;
+        }
+
+        if (log_file) //iteration, avg. loss, map
+        {
+            fprintf(log_file, "%d,%f,%f\n", iteration, avg_loss, mean_average_precision);
+            fflush(log_file);
+        }
 
         int draw_precision = 0;
         if (calc_map && (iteration >= next_map_calc || iteration == net.max_batches))
@@ -496,6 +531,9 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
         net_map.n = 0;
         free_network(net_map);
     }
+
+    if (log_file)
+        fclose(log_file);
 }
 
 static void *worker_entry(void *ctx)
