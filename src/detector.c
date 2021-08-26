@@ -39,14 +39,14 @@ typedef struct _worker_ctx
     int mjpeg_port;
     int show_imgs;
     int benchmark_layers;
-    char *chart_path;
 } worker_ctx;
 
-void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, int mjpeg_port, int show_imgs, int benchmark_layers, char *chart_path)
+void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, int mjpeg_port, int show_imgs, int benchmark_layers)
 {
     list *options = read_data_cfg(datacfg);
     char *train_images = option_find_str(options, "train", "data/train.txt");
     char *valid_images = option_find_str(options, "valid", train_images);
+    char *chart_path = option_find_str(options, "chart", "chart.png");
     char *log = option_find_str(options, "log", NULL);
     char *backup_directory = option_find_str(options, "backup", "/backup/");
     FILE *log_file = NULL;
@@ -459,7 +459,7 @@ void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, i
             if (cur_con_acc >= 0) avg_contrastive_acc = avg_contrastive_acc * 0.99 + cur_con_acc * 0.01;
             //printf("  avg_contrastive_acc = %f \n", avg_contrastive_acc);
         }
-        draw_train_loss(windows_name, img, img_size, avg_loss, max_img_loss, iteration, net.max_batches, mean_average_precision, draw_precision, "mAP%", avg_contrastive_acc / 100, dont_show, mjpeg_port, avg_time);
+        draw_train_loss(windows_name, chart_path, img, img_size, avg_loss, max_img_loss, iteration, net.max_batches, mean_average_precision, draw_precision, "mAP%", avg_contrastive_acc / 100, dont_show, mjpeg_port, avg_time);
 #endif    // OPENCV
 
         //if (i % 1000 == 0 || (i < 1000 && i % 100 == 0)) {
@@ -541,21 +541,20 @@ static void *worker_entry(void *ctx)
     const worker_ctx *const as_struct = ctx;
 
     train_detector(as_struct->datacfg, as_struct->cfgfile, as_struct->weightfile, as_struct->gpus, as_struct->ngpus, as_struct->clear, as_struct->dont_show, as_struct->calc_map,
-        as_struct->mjpeg_port, as_struct->show_imgs, as_struct->benchmark_layers, as_struct->chart_path);
+        as_struct->mjpeg_port, as_struct->show_imgs, as_struct->benchmark_layers);
 
     //training finished; free allocated buffers
     free(as_struct->datacfg);
     free(as_struct->cfgfile);
     free(as_struct->weightfile);
     free(as_struct->gpus);
-    free(as_struct->chart_path);
     free(ctx);
 
     g_running_training_session = false;
     return NULL;
 }
 
-void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, int mjpeg_port, int show_imgs, int benchmark_layers, char *chart_path)
+void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, int mjpeg_port, int show_imgs, int benchmark_layers)
 {
     if (g_running_training_session)
     {
@@ -571,16 +570,14 @@ void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *
     const size_t datacfg_len = datacfg ? strlen(datacfg) : 0;
     const size_t cfgfile_len = cfgfile ? strlen(cfgfile) : 0;
     const size_t weightfile_len = weightfile ? strlen(weightfile) : 0;
-    const size_t chart_path_len = chart_path ? strlen(chart_path) : 0;
 
     char *const datacfg_copy = datacfg ? malloc(datacfg_len + 1) : NULL;
     char *const cfgfile_copy = cfgfile ? malloc(cfgfile_len + 1) : NULL;
     char *const weightfile_copy = weightfile ? malloc(weightfile_len + 1) : NULL;
     int *const gpus_copy = gpus ? malloc(ngpus * sizeof(int)) : NULL;
-    char *const chart_path_copy = chart_path ? malloc(chart_path_len + 1) : NULL;
     worker_ctx *const ctx = malloc(sizeof(worker_ctx));
 
-    if ((datacfg && !datacfg_copy) || (cfgfile && !cfgfile_copy) || (weightfile && !weightfile_copy) || (gpus && !gpus_copy) || (chart_path && !chart_path_copy) || !ctx)
+    if ((datacfg && !datacfg_copy) || (cfgfile && !cfgfile_copy) || (weightfile && !weightfile_copy) || (gpus && !gpus_copy) || !ctx)
     {
         fprintf(stderr, "Failed to allocate required buffers.\n");
         fflush(stderr);
@@ -589,7 +586,6 @@ void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *
         free(cfgfile_copy);
         free(weightfile_copy);
         free(gpus_copy);
-        free(chart_path_copy);
         free(ctx);
 
         return;
@@ -607,9 +603,6 @@ void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *
     if (gpus_copy)
         memcpy(gpus_copy, gpus, ngpus * sizeof(int));
 
-    if (chart_path_copy)
-        memcpy(chart_path_copy, chart_path, chart_path_len + 1);
-
     //create the worker. its job will be to run training while also listening for the kill signal.
     pthread_t thread;
     memset(ctx, 0, sizeof(*ctx));
@@ -625,7 +618,6 @@ void train_detector_detach(char *datacfg, char *cfgfile, char *weightfile, int *
     ctx->mjpeg_port = mjpeg_port;
     ctx->show_imgs = show_imgs;
     ctx->benchmark_layers = benchmark_layers;
-    ctx->chart_path = chart_path_copy;
 
     g_running_training_session = true; //this is an imperfect solution to account for race conditions. if a better solution is required, then a mutex should be used.
     g_finish_training_prematurely = false;
@@ -1985,6 +1977,7 @@ void draw_object(char *datacfg, char *cfgfile, char *weightfile, char *filename,
 {
     list *options = read_data_cfg(datacfg);
     char *name_list = option_find_str(options, "names", "data/names.list");
+    char *chart_path = option_find_str(options, "chart", "chart.png");
     int names_size = 0;
     char **names = get_labels_custom(name_list, &names_size); //get_labels(name_list);
 
@@ -2072,7 +2065,7 @@ void draw_object(char *datacfg, char *cfgfile, char *weightfile, char *filename,
             forward_backward_network_gpu(net, X, truth_cpu);
 
             float avg_loss = get_network_cost(net);
-            draw_train_loss(windows_name, img, img_size, avg_loss, max_img_loss, iteration, it_num, 0, 0, "mAP%", 0, dont_show, 0, 0);
+            draw_train_loss(windows_name, chart_path, img, img_size, avg_loss, max_img_loss, iteration, it_num, 0, 0, "mAP%", 0, dont_show, 0, 0);
 
             float inv_loss = 1.0 / max_val_cmp(0.01, avg_loss);
             //net.learning_rate = *lr_set * inv_loss;
@@ -2184,7 +2177,6 @@ void run_detector(int argc, char **argv)
     // and for recall mode (extended output table-like format with results for best_class fit)
     int ext_output = find_arg(argc, argv, "-ext_output");
     int save_labels = find_arg(argc, argv, "-save_labels");
-    char* chart_path = find_char_arg(argc, argv, "-chart", 0);
     if (argc < 4) {
         fprintf(stderr, "usage: %s %s [train/test/valid/demo/map] [data] [cfg] [weights (optional)]\n", argv[0], argv[1]);
         return;
@@ -2223,7 +2215,7 @@ void run_detector(int argc, char **argv)
             if (weights[strlen(weights) - 1] == 0x0d) weights[strlen(weights) - 1] = 0;
     char *filename = (argc > 6) ? argv[6] : 0;
     if (0 == strcmp(argv[2], "test")) test_detector(datacfg, cfg, weights, filename, thresh, hier_thresh, dont_show, ext_output, save_labels, outfile, letter_box, benchmark_layers);
-    else if (0 == strcmp(argv[2], "train")) train_detector(datacfg, cfg, weights, gpus, ngpus, clear, dont_show, calc_map, mjpeg_port, show_imgs, benchmark_layers, chart_path);
+    else if (0 == strcmp(argv[2], "train")) train_detector(datacfg, cfg, weights, gpus, ngpus, clear, dont_show, calc_map, mjpeg_port, show_imgs, benchmark_layers);
     else if (0 == strcmp(argv[2], "valid")) validate_detector(datacfg, cfg, weights, outfile);
     else if (0 == strcmp(argv[2], "recall")) validate_detector_recall(datacfg, cfg, weights);
     else if (0 == strcmp(argv[2], "map")) validate_detector_map(datacfg, cfg, weights, thresh, iou_thresh, map_points, letter_box, NULL);

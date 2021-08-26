@@ -94,7 +94,7 @@ void draw_detections_cv_v3(mat_cv* show_img, detection *dets, int num, float thr
 
 // Draw Loss & Accuracy chart
 mat_cv* draw_train_chart(char *windows_name, float max_img_loss, int max_batches, int number_of_lines, int img_size, int dont_show, char* chart_path);
-void draw_train_loss(char *windows_name, mat_cv* img, int img_size, float avg_loss, float max_img_loss, int current_batch, int max_batches,
+void draw_train_loss(char *windows_name, char *chart_path, mat_cv* img, int img_size, float avg_loss, float max_img_loss, int current_batch, int max_batches,
     float precision, int draw_precision, char *accuracy_name, float contr_acc, int dont_show, int mjpeg_port, double time_remaining);
 
 // Data augmentation
