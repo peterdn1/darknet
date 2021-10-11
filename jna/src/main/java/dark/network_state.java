@@ -7,13 +7,13 @@ import java.util.Arrays;
 import java.util.List;
 
 public class network_state extends Structure {
-   public Pointer truth;
-   public Pointer input;
-   public Pointer delta;
-   public Pointer workspace;
+   public Pointer truth; //float*
+   public Pointer input; //float*
+   public Pointer delta; //float*
+   public Pointer workspace; //float*
    public int train;
    public int index;
-   public Pointer net;
+   public network net;
 
    public network_state() {
       super();

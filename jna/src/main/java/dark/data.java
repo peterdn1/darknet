@@ -13,8 +13,8 @@ public class data extends Structure {
     matrix X;
     matrix Y;
     int shallow;
-    Pointer num_boxes;
-    PointerByReference boxes;
+    Pointer num_boxes; //int*
+    PointerByReference boxes; //box**
     public data() {
         super();
     }

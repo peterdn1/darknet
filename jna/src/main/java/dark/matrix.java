@@ -10,7 +10,7 @@ import java.util.List;
 public class matrix extends Structure {
     int rows;
     int cols;
-    PointerByReference vals;
+    PointerByReference vals; //float**
     public matrix() {
         super();
     }

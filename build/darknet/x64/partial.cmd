@@ -2,9 +2,38 @@ rem Download weights for - DenseNet201, ResNet50 and ResNet152 by this link: htt
 rem Download Yolo/Tiny-yolo: https://pjreddie.com/darknet/yolo/
 rem Download Yolo9000: http://pjreddie.com/media/files/yolo9000.weights
 
+darknet.exe partial cfg/yolov4-csp.cfg yolov4-csp.weights yolov4-csp.conv.142 142
+
+darknet.exe partial cfg/yolov4x-mish.cfg yolov4x-mish.weights yolov4x-mish.conv.166 166
+
+
+
+
+rem darknet.exe partial cfg/yolov4-p5.cfg yolov4-p5.weights yolov4-p5.conv.232 232
+
+rem darknet.exe partial cfg/yolov4-p6.cfg yolov4-p6.weights yolov4-p6.conv.289 289
+
+
 
 rem darknet.exe partial cfg/tiny-yolo-voc.cfg tiny-yolo-voc.weights tiny-yolo-voc.conv.13 13
 
+rem darknet.exe partial cfg/yolov4-tiny.cfg yolov4-tiny.weights yolov4-tiny.conv.29 29
+
+
+rem darknet.exe partial cfg/yolov4-sam-mish.cfg cfg/yolov4-sam-mish.weights cfg/yolov4-sam-mish.conv.137 137
+
+rem darknet.exe partial cfg/yolov4-sam-mish.cfg cfg/yolov4-sam-mish.weights cfg/yolov4-sam-mish.conv.105 105
+
+
+pause
+
+darknet.exe partial cfg/csdarknet53-omega.cfg csdarknet53-omega_final.weights csdarknet53-omega.conv.105 105
+
+
+darknet.exe partial cfg/cd53paspp-omega.cfg cd53paspp-omega_final.weights cd53paspp-omega.conv.137 137
+
+
+darknet.exe partial cfg/yolov4.cfg backup/yolov4_final.weights yolov4.conv.137 137
 
 
 darknet.exe partial cfg/csresnext50.cfg csresnext50.weights csresnext50.conv.75 75

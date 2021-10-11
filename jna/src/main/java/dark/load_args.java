@@ -9,11 +9,11 @@ import java.util.List;
 
 public class load_args extends Structure implements Structure.ByValue {
     public int threads;
-    public PointerByReference paths;
-    public Pointer path;
+    public PointerByReference paths; //char**
+    public Pointer path; //char*
     public int n;
     public int m;
-    public PointerByReference labels;
+    public PointerByReference labels; //char**
     public int h;
     public int w;
     public int c; // color depth
@@ -22,6 +22,7 @@ public class load_args extends Structure implements Structure.ByValue {
     public int nh;
     public int nw;
     public int num_boxes;
+    public int truth_size;
     public int min, max, size;
     public int classes;
     public int background;
@@ -32,9 +33,16 @@ public class load_args extends Structure implements Structure.ByValue {
     public int track;
     public int augment_speed;
     public int letter_box;
+    public int mosaic_bound;
     public int show_imgs;
+    public int dontuse_opencv;
+    public int contrastive;
+    public int contrastive_jit_flip;
+    public int contrastive_color;
     public float jitter;
+    public float resize;
     public int flip;
+    public int gaussian_noise;
     public int blur;
     public int mixup;
     public float label_smooth_eps;
@@ -43,11 +51,11 @@ public class load_args extends Structure implements Structure.ByValue {
     public float saturation;
     public float exposure;
     public float hue;
-    public Pointer d;
-    public Pointer im;
-    public Pointer resized;
+    public Pointer d; //data*
+    public Pointer im; //image*
+    public Pointer resized; //image*
     public int type;
-    public Pointer hierarchy;
+    public Pointer hierarchy; //tree*
 
     public load_args() {
         super();
@@ -60,47 +68,55 @@ public class load_args extends Structure implements Structure.ByValue {
     @Override
     protected List<String> getFieldOrder() {
         return Arrays.asList(
-    "threads",
-    "paths",
-    "path",
-    "n",
-    "m",
-    "labels",
-    "h",
-    "w",
-    "c",
-    "out_w",
-    "out_h",
-    "nh",
-    "nw",
-    "num_boxes",
-    "min",
-    "max",
-    "size",
-    "classes",
-    "background",
-    "scale",
-    "center",
-    "coords",
-    "mini_batch",
-    "track",
-    "augment_speed",
-    "letter_box",
-    "show_imgs",
-    "jitter",
-    "flip",
-    "blur",
-    "mixup",
-    "label_smooth_eps",
-    "angle",
-    "aspect",
-    "saturation",
-    "exposure",
-    "hue",
-    "d",
-    "im",
-    "resized",
-    "type",
-    "hierarchy");
+            "threads",
+            "paths",
+            "path",
+            "n",
+            "m",
+            "labels",
+            "h",
+            "w",
+            "c",
+            "out_w",
+            "out_h",
+            "nh",
+            "nw",
+            "num_boxes",
+            "truth_size",
+            "min",
+            "max",
+            "size",
+            "classes",
+            "background",
+            "scale",
+            "center",
+            "coords",
+            "mini_batch",
+            "track",
+            "augment_speed",
+            "letter_box",
+            "mosaic_bound",
+            "show_imgs",
+            "dontuse_opencv",
+            "contrastive",
+            "contrastive_jit_flip",
+            "contrastive_color",
+            "jitter",
+            "resize",
+            "flip",
+            "gaussian_noise",
+            "blur",
+            "mixup",
+            "label_smooth_eps",
+            "angle",
+            "aspect",
+            "saturation",
+            "exposure",
+            "hue",
+            "d",
+            "im",
+            "resized",
+            "type",
+            "hierarchy");
     }
 }

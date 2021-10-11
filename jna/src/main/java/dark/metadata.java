@@ -7,7 +7,7 @@ import java.util.List;
 
 public class metadata extends Structure implements Structure.ByValue {
     public int classes;
-    public Pointer names;
+    public Pointer names; //char**
 
     public metadata() {
         super();
