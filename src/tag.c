@@ -13,7 +13,10 @@ void train_tag(char *cfgfile, char *weightfile, int clear)
     if(weightfile){
         load_weights(&net, weightfile);
     }
-    if(clear) *net.seen = 0;
+    if (clear) {
+        *net.seen = 0;
+        *net.cur_iteration = 0;
+    }
     printf("Learning Rate: %g, Momentum: %g, Decay: %g\n", net.learning_rate, net.momentum, net.decay);
     int imgs = 1024;
     list* plist = get_paths("tag/train.list");
@@ -60,7 +63,7 @@ void train_tag(char *cfgfile, char *weightfile, int clear)
         float loss = train_network(net, train);
         if(avg_loss == -1) avg_loss = loss;
         avg_loss = avg_loss*.9 + loss*.1;
-        printf("%d, %.3f: %f, %f avg, %f rate, %lf seconds, %ld images\n", get_current_batch(net), (float)(*net.seen)/N, loss, avg_loss, get_current_rate(net), sec(clock()-time), *net.seen);
+        printf("%d, %.3f: %f, %f avg, %f rate, %lf seconds, %" PRIu64 " images\n", get_current_batch(net), (float)(*net.seen)/N, loss, avg_loss, get_current_rate(net), sec(clock()-time), *net.seen);
         free_data(train);
         if(*net.seen/N > epoch){
             epoch = *net.seen/N;

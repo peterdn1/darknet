@@ -69,10 +69,12 @@ connected_layer make_connected_layer(int batch, int steps, int inputs, int outpu
     l.out_c = outputs;
     l.n = l.out_c;
     l.size = 1;
-    l.stride = 1;
+    l.stride = l.stride_x = l.stride_y = 1;
     l.pad = 0;
     l.activation = activation;
     l.learning_rate_scale = 1;
+    l.groups = 1;
+    l.dilation = 1;
 
     l.output = (float*)xcalloc(total_batch * outputs, sizeof(float));
     l.delta = (float*)xcalloc(total_batch * outputs, sizeof(float));
@@ -306,8 +308,17 @@ void push_connected_layer(connected_layer l)
     CHECK_CUDA(cudaPeekAtLastError());
 }
 
-void update_connected_layer_gpu(connected_layer l, int batch, float learning_rate, float momentum, float decay)
+void update_connected_layer_gpu(connected_layer l, int batch, float learning_rate_init, float momentum, float decay, float loss_scale)
 {
+    float learning_rate = learning_rate_init * l.learning_rate_scale;
+
+    // Loss scale for Mixed-Precision on Tensor-Cores
+    if (loss_scale != 1.0) {
+        scal_ongpu(l.inputs*l.outputs, 1.0 / loss_scale, l.weight_updates_gpu, 1);
+        scal_ongpu(l.outputs, 1.0 / loss_scale, l.bias_updates_gpu, 1);
+        scal_ongpu(l.outputs, 1.0 / loss_scale, l.scale_updates_gpu, 1);
+    }
+
     axpy_ongpu(l.outputs, learning_rate/batch, l.bias_updates_gpu, 1, l.biases_gpu, 1);
     scal_ongpu(l.outputs, momentum, l.bias_updates_gpu, 1);
 
@@ -352,12 +363,12 @@ void forward_connected_layer_gpu(connected_layer l, network_state state)
     gemm_ongpu(0,1,m,n,k,1,a,k,b,k,1,c,n);
 #endif // CUDNN
 
-	if (l.batch_normalize) {
-		forward_batchnorm_layer_gpu(l, state);
-	}
-	else {
-		add_bias_gpu(l.output_gpu, l.biases_gpu, l.batch, l.outputs, 1);
-	}
+    if (l.batch_normalize) {
+        forward_batchnorm_layer_gpu(l, state);
+    }
+    else {
+        add_bias_gpu(l.output_gpu, l.biases_gpu, l.batch, l.outputs, 1);
+    }
     //for(i = 0; i < l.batch; ++i) axpy_ongpu(l.outputs, 1, l.biases_gpu, 1, l.output_gpu + i*l.outputs, 1);
     activate_array_ongpu(l.output_gpu, l.outputs*l.batch, l.activation);
 }

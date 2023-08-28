@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <atomic>
 #include <ctime>
 using std::cerr;
 using std::endl;
@@ -68,8 +70,12 @@ static int close_socket(SOCKET s) {
 #define SOCKADDR    struct sockaddr
 #define SOCKADDR_IN  struct sockaddr_in
 #define ADDRPOINTER  unsigned int*
+#ifndef INVALID_SOCKET
 #define INVALID_SOCKET -1
+#endif
+#ifndef SOCKET_ERROR
 #define SOCKET_ERROR   -1
+#endif
 struct _IGNORE_PIPE_SIGNAL
 {
     struct sigaction new_actn, old_actn;
@@ -258,10 +264,11 @@ public:
                 //_write(s, head, 0);
                 if (!close_all_sockets) _write(s, ", \n", 0);
                 int n = _write(s, outputbuf, outlen);
-                if (n < outlen)
+                if (n < (int)outlen)
                 {
                     cerr << "JSON_sender: kill client " << s << endl;
-                    ::shutdown(s, 2);
+                    close_socket(s);
+                    //::shutdown(s, 2);
                     FD_CLR(s, &master);
                 }
 
@@ -448,7 +455,7 @@ public:
         cv::imencode(".jpg", frame, outbuf, params);  //REMOVED FOR COMPATIBILITY
         // https://docs.opencv.org/3.4/d4/da8/group__imgcodecs.html#ga292d81be8d76901bff7988d18d2b42ac
         //std::cerr << "cv::imencode call disabled!" << std::endl;
-        size_t outlen = outbuf.size();
+        int outlen = static_cast<int>(outbuf.size());
 
 #ifdef _WIN32
         for (unsigned i = 0; i<rread.fd_count; i++)
@@ -501,14 +508,15 @@ public:
                 }
 
                 char head[400];
-                sprintf(head, "--mjpegstream\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n", outlen);
+                sprintf(head, "--mjpegstream\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", outlen);
                 _write(s, head, 0);
                 int n = _write(s, (char*)(&outbuf[0]), outlen);
-                //cerr << "known client " << s << " " << n << endl;
-                if (n < outlen)
+                cerr << "known client: " << s << ", sent = " << n << ", must be sent outlen = " << outlen << endl;
+                if (n < (int)outlen)
                 {
                     cerr << "MJPG_sender: kill client " << s << endl;
-                    ::shutdown(s, 2);
+                    //::shutdown(s, 2);
+                    close_socket(s);
                     FD_CLR(s, &master);
                 }
             }
@@ -680,6 +688,64 @@ void show_total_time() {
     std::cout << " Total: " << total_time * 1000 << " msec" << std::endl;
 }
 
+
+int custom_create_thread(custom_thread_t * tid, const custom_attr_t * attr, void *(*func) (void *), void *arg)
+{
+    std::thread *ptr = new std::thread(func, arg);
+    *tid = (custom_thread_t *)ptr;
+    if (tid) return 0;
+    else return -1;
+}
+
+int custom_join(custom_thread_t tid, void **value_ptr)
+{
+    std::thread *ptr = (std::thread *)tid;
+    if (ptr) {
+        ptr->join();
+        delete ptr;
+        return 0;
+    }
+    else printf(" Error: ptr of thread is NULL in custom_join() \n");
+
+    return -1;
+}
+
+int custom_atomic_load_int(volatile int* obj)
+{
+    const volatile std::atomic<int>* ptr_a = (const volatile std::atomic<int>*)obj;
+    return std::atomic_load(ptr_a);
+}
+
+void custom_atomic_store_int(volatile int* obj, int desr)
+{
+    volatile std::atomic<int>* ptr_a = (volatile std::atomic<int>*)obj;
+    std::atomic_store(ptr_a, desr);
+}
+
+int get_num_threads()
+{
+    return std::thread::hardware_concurrency();
+}
+
+#if !defined(__MINGW64__)
+void this_thread_sleep_for(int ms_time)
+{
+    std::chrono::milliseconds dura(ms_time);
+    std::this_thread::sleep_for(dura);
+}
+#else
+void this_thread_sleep_for(int ms_time)
+{
+    std::cerr << " this_thread_sleep_for() isn't implemented \n";
+    return;
+}
+#endif
+
+void this_thread_yield()
+{
+    std::this_thread::yield();
+}
+
 #else // C++11
 #include <iostream>
 
@@ -693,3 +759,182 @@ void stop_timer_and_show() {
 void stop_timer_and_show_name(char *name) { stop_timer_and_show(); }
 void total_time() {}
 #endif // C++11
+
+#include <deque>
+#include <vector>
+#include <iostream>
+#include "blas.h"
+#include "utils.h"
+
+struct similarity_detections_t {
+    int old_id, new_id;
+    float sim;
+};
+
+int check_prob(detection det, float thresh)
+{
+    for (int i = 0; i < det.classes; ++i) {
+        if (det.prob[i] > thresh) return 1;
+    }
+    return 0;
+}
+
+int check_classes_id(detection det1, detection det2, float thresh)
+{
+    if (det1.classes != det2.classes) {
+        printf(" Error: det1.classes != det2.classes \n");
+        getchar();
+    }
+
+    int det1_id = -1;
+    float det1_prob = 0;
+    int det2_id = -1;
+    float det2_prob = 0;
+
+    for (int i = 0; i < det1.classes; ++i) {
+        if (det1.prob[i] > thresh && det1.prob[i] > det1_prob) {
+            det1_prob = det1.prob[i];
+            det1_id = i;
+        }
+        if (det2.prob[i] > thresh && det2.prob[i] > det2_prob) {
+            det2_prob = det2.prob[i];
+            det2_id = i;
+        }
+    }
+
+    if (det1_id == det2_id && det2_id != -1) return 1;
+
+    //for (int i = 0; i < det1.classes; ++i) {
+    //    if (det1.prob[i] > thresh && det2.prob[i] > thresh) return 1;
+    //}
+    return 0;
+}
+
+int fill_remaining_id(detection *new_dets, int new_dets_num, int new_track_id, float thresh, int detection_count)
+{
+    for (int i = 0; i < new_dets_num; ++i) {
+        if (new_dets[i].track_id == 0 && check_prob(new_dets[i], thresh)) {
+            //printf(" old_tid = %d, new_tid = %d, sim = %f \n", new_dets[i].track_id, new_track_id, new_dets[i].sim);
+            if (new_dets[i].sort_class > detection_count) {
+                new_dets[i].track_id = new_track_id;
+                new_track_id++;
+            }
+        }
+    }
+    return new_track_id;
+}
+
+float *make_float_array(float* src, size_t size)
+{
+    float *dst = (float*)xcalloc(size, sizeof(float));
+    memcpy(dst, src, size*sizeof(float));
+    return dst;
+}
+
+struct detection_t : detection {
+    int det_count;
+    detection_t(detection det) : detection(det), det_count(0)
+    {
+        if (embeddings) embeddings = make_float_array(det.embeddings, embedding_size);
+        if (prob) prob = make_float_array(det.prob, classes);
+        if (uc) uc = make_float_array(det.uc, 4);
+    }
+
+    detection_t(detection_t const& det) : detection(det)
+    {
+        if (embeddings) embeddings = make_float_array(det.embeddings, embedding_size);
+        if (prob) prob = make_float_array(det.prob, classes);
+        if (uc) uc = make_float_array(det.uc, 4);
+    }
+
+    ~detection_t() {
+        if (embeddings) free(embeddings);
+        if (prob) free(prob);
+        if (uc) free(uc);
+    }
+};
+
+
+
+void set_track_id(detection *new_dets, int new_dets_num, float thresh, float sim_thresh, float track_ciou_norm, int deque_size, int dets_for_track, int dets_for_show)
+{
+    static int new_track_id = 1;
+    static std::deque<std::vector<detection_t>> old_dets_dq;
+
+    // copy detections from queue of vectors to the one vector
+    std::vector<detection_t> old_dets;
+    for (std::vector<detection_t> &v : old_dets_dq) {
+        for (int i = 0; i < v.size(); ++i) {
+            old_dets.push_back(v[i]);
+        }
+    }
+
+    std::vector<similarity_detections_t> sim_det(old_dets.size() * new_dets_num);
+
+    // calculate similarity
+    for (int old_id = 0; old_id < old_dets.size(); ++old_id) {
+        for (int new_id = 0; new_id < new_dets_num; ++new_id) {
+            const int index = old_id*new_dets_num + new_id;
+            const float sim = cosine_similarity(new_dets[new_id].embeddings, old_dets[old_id].embeddings, old_dets[0].embedding_size);
+            sim_det[index].new_id = new_id;
+            sim_det[index].old_id = old_id;
+            sim_det[index].sim = sim;
+        }
+    }
+
+    // sort similarity
+    std::sort(sim_det.begin(), sim_det.end(), [](similarity_detections_t v1, similarity_detections_t v2) { return v1.sim > v2.sim; });
+    //if(sim_det.size() > 0) printf(" sim_det_first = %f, sim_det_end = %f \n", sim_det.begin()->sim, sim_det.rbegin()->sim);
+
+    std::vector<int> new_idx(new_dets_num, 1);
+    std::vector<int> old_idx(old_dets.size(), 1);
+    std::vector<int> track_idx(new_track_id, 1);
+
+    // match objects
+    for (int index = 0; index < new_dets_num*old_dets.size(); ++index) {
+        const int new_id = sim_det[index].new_id;
+        const int old_id = sim_det[index].old_id;
+        const int track_id = old_dets[old_id].track_id;
+        const int det_count = old_dets[old_id].sort_class;
+        //printf(" ciou = %f \n", box_ciou(new_dets[new_id].bbox, old_dets[old_id].bbox));
+        if (track_idx[track_id] && new_idx[new_id] && old_idx[old_id] && check_classes_id(new_dets[new_id], old_dets[old_id], thresh)) {
+            float sim = sim_det[index].sim;
+            //float ciou = box_ciou(new_dets[new_id].bbox, old_dets[old_id].bbox);
+            float ciou = box_iou(new_dets[new_id].bbox, old_dets[old_id].bbox);
+            sim = sim * (1 - track_ciou_norm) + ciou * track_ciou_norm;
+            if (sim_thresh < sim && new_dets[new_id].sim < sim) {
+                new_dets[new_id].sim = sim;
+                new_dets[new_id].track_id = track_id;
+                new_dets[new_id].sort_class = det_count + 1;
+                //new_idx[new_id] = 0;
+                old_idx[old_id] = 0;
+                if(track_id) track_idx[track_id] = 0;
+            }
+        }
+    }
+
+    // set new track_id
+    new_track_id = fill_remaining_id(new_dets, new_dets_num, new_track_id, thresh, dets_for_track);
+
+    // store new_detections to the queue of vectors
+    std::vector<detection_t> new_det_vec;
+    for (int i = 0; i < new_dets_num; ++i) {
+        if (check_prob(new_dets[i], thresh)) {
+            new_det_vec.push_back(new_dets[i]);
+        }
+    }
+
+    // add new
+    old_dets_dq.push_back(new_det_vec);
+    // remove old
+    if (old_dets_dq.size() > deque_size) old_dets_dq.pop_front();
+
+    // remove detection which were detected only on few frames
+    for (int i = 0; i < new_dets_num; ++i) {
+        if (new_dets[i].sort_class < dets_for_show) {
+            for (int j = 0; j < new_dets[i].classes; ++j) {
+                new_dets[i].prob[j] = 0;
+            }
+        }
+    }
+}

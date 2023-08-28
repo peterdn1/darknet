@@ -231,6 +231,9 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
     // 2. Loss Scaling - required only for: activation gradients. We do not use.
     // 3. FP32 Master Copy of Weights
     // More: http://docs.nvidia.com/deeplearning/sdk/cudnn-developer-guide/index.html#tensor_ops
+    if (l->groups < 1) l->groups = 1;
+    if (l->stride_x < 1) l->stride_x = 1;
+    if (l->stride_y < 1) l->stride_y = 1;
     CHECK_CUDNN(cudnnSetConvolutionGroupCount(l->convDesc, l->groups));
     CHECK_CUDNN(cudnnSetConvolutionMathType(l->convDesc, CUDNN_TENSOR_OP_MATH));
 #if((CUDNN_MAJOR*10 + CUDNN_MINOR) >= 72)   // cuDNN >= 7.2
@@ -238,7 +241,7 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
 #endif
 #else   //if(CUDNN_MAJOR >= 7)
     if (l->groups > 1) {
-        error("CUDNN < 7 doesn't support groups, please upgrade!");
+        error("CUDNN < 7 doesn't support groups, please upgrade!", DARKNET_LOC);
     }
 #endif
 
@@ -256,7 +259,6 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->dstTensorDesc, CUDNN_TENSOR_NCHW, data_type, l->batch, l->out_c, l->out_h, l->out_w));
     CHECK_CUDNN(cudnnSetFilter4dDescriptor(l->weightDesc, data_type, CUDNN_TENSOR_NCHW, l->n, l->c / l->groups, l->size, l->size));
 
-//#ifdef CUDNN_HALF
     // backward delta
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->dsrcTensorDesc16, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, l->batch, l->c, l->h, l->w));
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->ddstTensorDesc16, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, l->batch, l->out_c, l->out_h, l->out_w));
@@ -269,18 +271,147 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
 
     // batch norm
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->normDstTensorDescF16, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, l->batch, l->out_c, l->out_h, l->out_w));
-//#endif
 
     // batch norm
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->normTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, 1, l->out_c, 1, 1));
     CHECK_CUDNN(cudnnSetTensor4dDescriptor(l->normDstTensorDesc, CUDNN_TENSOR_NCHW, CUDNN_DATA_FLOAT, l->batch, l->out_c, l->out_h, l->out_w));
 
-    //printf("\n l->dilation = %d, l->pad = %d, l->size = %d \n", l->dilation, l->pad, l->size);
+    //printf("\n l->dilation = %d, l->pad = %d, l->size = %d, l->stride = %d, l->stride_x = %d, l->stride_y = %d, l->groups = %d, l->w = %d, l->h = %d, l->c = %d, l->n = %d, l->out_w = %d, l->out_h = %d, l->out_c = %d, l->batch = %d, data_type = %d \n",
+    //    l->dilation, l->pad, l->size, l->stride, l->stride_x, l->stride_y, l->groups, l->w, l->h, l->c, l->n, l->out_w, l->out_h, l->out_c, l->batch, data_type);
 #if(CUDNN_MAJOR >= 6)
-    CHECK_CUDNN(cudnnSetConvolution2dDescriptor(l->convDesc, l->pad * l->dilation, l->pad* l->dilation, l->stride_y, l->stride_x, l->dilation, l->dilation, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));    // cudnn >= 6.0
+    CHECK_CUDNN(cudnnSetConvolution2dDescriptor(l->convDesc, l->pad * l->dilation, l->pad * l->dilation, l->stride_y, l->stride_x, l->dilation, l->dilation, CUDNN_CROSS_CORRELATION, CUDNN_DATA_FLOAT));    // cudnn >= 6.0
 #else
     CHECK_CUDNN(cudnnSetConvolution2dDescriptor(l->convDesc, l->pad * l->dilation, l->pad * l->dilation, l->stride_y, l->stride_x, l->dilation, l->dilation, CUDNN_CROSS_CORRELATION));    // cudnn 5.1
 #endif
+
+
+#if CUDNN_MAJOR >= 8
+
+    if (cudnn_preference == cudnn_smallest)
+    {
+        workspace_size_specify = 0;
+    }
+
+    size_t free_memory, total_memory;
+    int requested_algo_count = 0, returned_algo_count = 0;
+    int found_conv_algorithm = 0;
+    float min_time = 1000000;   // 1000 sec
+
+    // FWD
+    cudnnConvolutionFwdAlgoPerf_t conv_fwd_results[100];
+    CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithmMaxCount(cudnn_handle(), &requested_algo_count));
+
+    CHECK_CUDNN(cudnnGetConvolutionForwardAlgorithm_v7(cudnn_handle(),
+        l->srcTensorDesc,
+        l->weightDesc,
+        l->convDesc,
+        l->dstTensorDesc,
+        requested_algo_count, // (cudnnConvolutionFwdPreference_t)forward_algo,
+        &returned_algo_count, // workspace_size_specify,
+        conv_fwd_results));
+
+    CHECK_CUDA(cudaMemGetInfo(&free_memory, &total_memory));
+
+    found_conv_algorithm = 0;
+    min_time = 1000000;   // 1000 sec
+    for (int i = 0; i < returned_algo_count; i++)
+    {
+        if (conv_fwd_results[i].status == CUDNN_STATUS_SUCCESS &&
+            conv_fwd_results[i].algo != CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED &&
+            conv_fwd_results[i].memory < free_memory &&
+            (conv_fwd_results[i].memory <= workspace_size_specify || cudnn_preference == cudnn_fastest) &&
+            conv_fwd_results[i].time < min_time)
+        {
+            found_conv_algorithm = 1;
+            l->fw_algo = conv_fwd_results[i].algo;
+            min_time = conv_fwd_results[i].time;
+            //printf(" - cuDNN FWD algo: %d, time = %f ms \n", l->fw_algo, min_time);
+        }
+    }
+
+    if (!found_conv_algorithm) {
+        printf(" Error: cuDNN isn't found FWD algo for convolution.\n");
+        getchar();
+        exit(0);
+    }
+    //printf(" cuDNN FWD algo: %d, time = %f ms \n", l->fw_algo, min_time);
+
+    // Bwd-Data
+    cudnnConvolutionBwdDataAlgoPerf_t conv_bwd_data_results[100];
+    CHECK_CUDNN(cudnnGetConvolutionBackwardDataAlgorithmMaxCount(cudnn_handle(), &requested_algo_count));
+
+    CHECK_CUDNN(cudnnGetConvolutionBackwardDataAlgorithm_v7(cudnn_handle(),
+        l->weightDesc,
+        l->ddstTensorDesc,
+        l->convDesc,
+        l->dsrcTensorDesc,
+        requested_algo_count, // (cudnnConvolutionFwdPreference_t)forward_algo,
+        &returned_algo_count, // workspace_size_specify,
+        &conv_bwd_data_results[0]));
+
+    CHECK_CUDA(cudaMemGetInfo(&free_memory, &total_memory));
+
+    found_conv_algorithm = 0;
+    min_time = 1000000;   // 1000 sec
+    for (int i = 0; i < returned_algo_count; i++)
+    {
+        if (conv_bwd_data_results[i].status == CUDNN_STATUS_SUCCESS &&
+            conv_bwd_data_results[i].memory < free_memory &&
+            (conv_bwd_data_results[i].memory <= workspace_size_specify || cudnn_preference == cudnn_fastest) &&
+            conv_bwd_data_results[i].time < min_time)
+        {
+            found_conv_algorithm = 1;
+            l->bd_algo = conv_bwd_data_results[i].algo;
+            min_time = conv_bwd_data_results[i].time;
+        }
+    }
+
+    if (!found_conv_algorithm) {
+        printf(" Error: cuDNN isn't found BWD-data algo for convolution.\n");
+        getchar();
+        exit(0);
+    }
+    //printf(" cuDNN BWD-data algo: %d \n", l->bd_algo);
+
+    // Bwd-Filters
+    cudnnConvolutionBwdFilterAlgoPerf_t conv_bwd_filter_results[100];
+    CHECK_CUDNN(cudnnGetConvolutionBackwardFilterAlgorithmMaxCount(cudnn_handle(), &requested_algo_count));
+
+    CHECK_CUDNN(cudnnGetConvolutionBackwardFilterAlgorithm_v7(cudnn_handle(),
+        l->srcTensorDesc,
+        l->ddstTensorDesc,
+        l->convDesc,
+        l->dweightDesc,
+        requested_algo_count, // (cudnnConvolutionFwdPreference_t)forward_algo,
+        &returned_algo_count, // workspace_size_specify,
+        &conv_bwd_filter_results[0]));
+
+    CHECK_CUDA(cudaMemGetInfo(&free_memory, &total_memory));
+
+    found_conv_algorithm = 0;
+    min_time = 1000000;   // 1000 sec
+    for (int i = 0; i < returned_algo_count; i++)
+    {
+        if (conv_bwd_filter_results[i].status == CUDNN_STATUS_SUCCESS &&
+            conv_bwd_filter_results[i].memory < free_memory &&
+            (conv_bwd_filter_results[i].memory <= workspace_size_specify || cudnn_preference == cudnn_fastest) &&
+            conv_bwd_filter_results[i].time < min_time)
+        {
+            found_conv_algorithm = 1;
+            l->bf_algo = conv_bwd_filter_results[i].algo;
+            min_time = conv_bwd_filter_results[i].time;
+        }
+    }
+
+    if (!found_conv_algorithm) {
+        printf(" Error: cuDNN isn't found BWD-filter algo for convolution.\n");
+        getchar();
+        exit(0);
+    }
+    //printf(" cuDNN BWD-filter algo: %d \n", l->bf_algo);
+
+#else   // CUDNN_MAJOR >= 8
+
     int forward_algo = CUDNN_CONVOLUTION_FWD_PREFER_FASTEST;
     int backward_algo = CUDNN_CONVOLUTION_BWD_DATA_PREFER_FASTEST;
     int backward_filter = CUDNN_CONVOLUTION_BWD_FILTER_PREFER_FASTEST;
@@ -307,22 +438,26 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
             (cudnnConvolutionFwdPreference_t)forward_algo,
             workspace_size_specify,
             &l->fw_algo));
+
     CHECK_CUDNN(cudnnGetConvolutionBackwardDataAlgorithm(cudnn_handle(),
-            l->weightDesc,
-            l->ddstTensorDesc,
-            l->convDesc,
-            l->dsrcTensorDesc,
-            (cudnnConvolutionBwdDataPreference_t)backward_algo,
-            workspace_size_specify,
-            &l->bd_algo));
+        l->weightDesc,
+        l->ddstTensorDesc,
+        l->convDesc,
+        l->dsrcTensorDesc,
+        (cudnnConvolutionBwdDataPreference_t)backward_algo,
+        workspace_size_specify,
+        &l->bd_algo));
+
     CHECK_CUDNN(cudnnGetConvolutionBackwardFilterAlgorithm(cudnn_handle(),
-            l->srcTensorDesc,
-            l->ddstTensorDesc,
-            l->convDesc,
-            l->dweightDesc,
-            (cudnnConvolutionBwdFilterPreference_t)backward_filter,
-            workspace_size_specify,
-            &l->bf_algo));
+        l->srcTensorDesc,
+        l->ddstTensorDesc,
+        l->convDesc,
+        l->dweightDesc,
+        (cudnnConvolutionBwdFilterPreference_t)backward_filter,
+        workspace_size_specify,
+        &l->bf_algo));
+#endif  // CUDNN_MAJOR >= 8
+
 
     //if (data_type == CUDNN_DATA_HALF)
     {
@@ -344,28 +479,28 @@ void cudnn_convolutional_setup(layer *l, int cudnn_preference, size_t workspace_
 void free_convolutional_batchnorm(convolutional_layer *l)
 {
     if (!l->share_layer) {
-        free(l->scales);            l->scales = NULL;
-        free(l->scale_updates);     l->scale_updates = NULL;
-        free(l->mean);              l->mean = NULL;
-        free(l->variance);          l->variance = NULL;
-        free(l->mean_delta);        l->mean_delta = NULL;
-        free(l->variance_delta);    l->variance_delta = NULL;
-        free(l->rolling_mean);      l->rolling_mean = NULL;
-        free(l->rolling_variance);  l->rolling_variance = NULL;
-        free(l->x);                 l->x = NULL;
-        free(l->x_norm);            l->x_norm = NULL;
+        if (l->scales)          free(l->scales),            l->scales = NULL;
+        if (l->scale_updates)   free(l->scale_updates),     l->scale_updates = NULL;
+        if (l->mean)            free(l->mean),              l->mean = NULL;
+        if (l->variance)        free(l->variance),          l->variance = NULL;
+        if (l->mean_delta)      free(l->mean_delta),        l->mean_delta = NULL;
+        if (l->variance_delta)  free(l->variance_delta),    l->variance_delta = NULL;
+        if (l->rolling_mean)    free(l->rolling_mean),      l->rolling_mean = NULL;
+        if (l->rolling_variance) free(l->rolling_variance),  l->rolling_variance = NULL;
+        if (l->x)               free(l->x),                 l->x = NULL;
+        if (l->x_norm)          free(l->x_norm),            l->x_norm = NULL;
 
 #ifdef GPU
-        cuda_free(l->scales_gpu);           l->scales_gpu = NULL;
-        cuda_free(l->scale_updates_gpu);    l->scale_updates_gpu = NULL;
-        cuda_free(l->mean_gpu);             l->mean_gpu = NULL;
-        cuda_free(l->variance_gpu);         l->variance_gpu = NULL;
-        cuda_free(l->mean_delta_gpu);       l->mean_delta_gpu = NULL;
-        cuda_free(l->variance_delta_gpu);   l->variance_delta_gpu = NULL;
-        cuda_free(l->rolling_mean_gpu);     l->rolling_mean_gpu = NULL;
-        cuda_free(l->rolling_variance_gpu); l->rolling_variance_gpu = NULL;
-        cuda_free(l->x_gpu);                l->x_gpu = NULL;
-        cuda_free(l->x_norm_gpu);           l->x_norm_gpu = NULL;
+        if (l->scales_gpu)          cuda_free(l->scales_gpu),           l->scales_gpu = NULL;
+        if (l->scale_updates_gpu)   cuda_free(l->scale_updates_gpu),    l->scale_updates_gpu = NULL;
+        if (l->mean_gpu)            cuda_free(l->mean_gpu),             l->mean_gpu = NULL;
+        if (l->variance_gpu)        cuda_free(l->variance_gpu),         l->variance_gpu = NULL;
+        if (l->mean_delta_gpu)      cuda_free(l->mean_delta_gpu),       l->mean_delta_gpu = NULL;
+        if (l->variance_delta_gpu)  cuda_free(l->variance_delta_gpu),   l->variance_delta_gpu = NULL;
+        if (l->rolling_mean_gpu)    cuda_free(l->rolling_mean_gpu),     l->rolling_mean_gpu = NULL;
+        if (l->rolling_variance_gpu) cuda_free(l->rolling_variance_gpu), l->rolling_variance_gpu = NULL;
+        if (l->x_gpu)               cuda_free(l->x_gpu),                l->x_gpu = NULL;
+        if (l->x_norm_gpu)          cuda_free(l->x_norm_gpu),           l->x_norm_gpu = NULL;
 #endif
     }
 }
@@ -388,6 +523,7 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
         stride_x = stride_y = l.stride = l.stride_x = l.stride_y = 1; // use stride=1 in host-layer
     }
 
+    l.wait_stream_id = -1;
     l.deform = deform;
     l.assisted_excitation = assisted_excitation;
     l.share_layer = share_layer;
@@ -414,7 +550,7 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
 
     if (l.share_layer) {
         if (l.size != l.share_layer->size || l.nweights != l.share_layer->nweights || l.c != l.share_layer->c || l.n != l.share_layer->n) {
-            printf("Layer size, nweights, channels or filters don't match for the share_layer");
+            printf(" Layer size, nweights, channels or filters don't match for the share_layer");
             getchar();
         }
 
@@ -431,12 +567,20 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
         if (train) {
             l.weight_updates = (float*)xcalloc(l.nweights, sizeof(float));
             l.bias_updates = (float*)xcalloc(n, sizeof(float));
+
+            l.weights_ema = (float*)xcalloc(l.nweights, sizeof(float));
+            l.biases_ema = (float*)xcalloc(n, sizeof(float));
         }
     }
 
     // float scale = 1./sqrt(size*size*c);
     float scale = sqrt(2./(size*size*c/groups));
-    for(i = 0; i < l.nweights; ++i) l.weights[i] = scale*rand_uniform(-1, 1);   // rand_normal();
+    if (l.activation == NORM_CHAN || l.activation == NORM_CHAN_SOFTMAX || l.activation == NORM_CHAN_SOFTMAX_MAXVAL) {
+        for (i = 0; i < l.nweights; ++i) l.weights[i] = 1;   // rand_normal();
+    }
+    else {
+        for (i = 0; i < l.nweights; ++i) l.weights[i] = scale*rand_uniform(-1, 1);   // rand_normal();
+    }
     int out_h = convolutional_out_height(l);
     int out_w = convolutional_out_width(l);
     l.out_h = out_h;
@@ -497,6 +641,7 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
                 l.scales[i] = 1;
             }
             if (train) {
+                l.scales_ema = (float*)xcalloc(n, sizeof(float));
                 l.scale_updates = (float*)xcalloc(n, sizeof(float));
 
                 l.mean = (float*)xcalloc(n, sizeof(float));
@@ -518,7 +663,7 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
     }
 
 #ifndef GPU
-    if (l.activation == SWISH || l.activation == MISH) l.activation_input = (float*)calloc(total_batch*l.outputs, sizeof(float));
+    if (l.activation == SWISH || l.activation == MISH || l.activation == HARD_MISH) l.activation_input = (float*)calloc(total_batch*l.outputs, sizeof(float));
 #endif  // not GPU
 
     if(adam){
@@ -540,7 +685,7 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
 
     if(gpu_index >= 0){
 
-        if (l.activation == SWISH || l.activation == MISH) {
+        if (train && (l.activation == SWISH || l.activation == MISH || l.activation == HARD_MISH)) {
             l.activation_input_gpu = cuda_make_array(l.activation_input, total_batch*l.outputs);
         }
 
@@ -604,6 +749,8 @@ convolutional_layer make_convolutional_layer(int batch, int steps, int h, int w,
 
                     l.mean_gpu = cuda_make_array(l.mean, n);
                     l.variance_gpu = cuda_make_array(l.variance, n);
+                    l.m_cbn_avg_gpu = cuda_make_array(l.mean, n);
+                    l.v_cbn_avg_gpu = cuda_make_array(l.variance, n);
 #ifndef CUDNN
                     l.mean_delta_gpu = cuda_make_array(l.mean, n);
                     l.variance_delta_gpu = cuda_make_array(l.variance, n);
@@ -775,9 +922,9 @@ void resize_convolutional_layer(convolutional_layer *l, int w, int h)
         //l->binary_input = realloc(l->inputs*l->batch, sizeof(float));
     }
 
-    if (l->activation == SWISH || l->activation == MISH) l->activation_input = (float*)realloc(l->activation_input, total_batch*l->outputs * sizeof(float));
+    if (l->activation == SWISH || l->activation == MISH || l->activation == HARD_MISH) l->activation_input = (float*)realloc(l->activation_input, total_batch*l->outputs * sizeof(float));
 #ifdef GPU
-    if (old_w < w || old_h < h) {
+    if (old_w < w || old_h < h || l->dynamic_minibatch) {
         if (l->train) {
             cuda_free(l->delta_gpu);
             l->delta_gpu = cuda_make_array(l->delta, total_batch*l->outputs);
@@ -801,7 +948,7 @@ void resize_convolutional_layer(convolutional_layer *l, int w, int h)
             l->binary_input_gpu = cuda_make_array(0, l->inputs*l->batch);
         }
 
-        if (l->activation == SWISH || l->activation == MISH) {
+        if (l->activation == SWISH || l->activation == MISH || l->activation == HARD_MISH) {
             cuda_free(l->activation_input_gpu);
             l->activation_input_gpu = cuda_make_array(l->activation_input, total_batch*l->outputs);
         }
@@ -1211,8 +1358,10 @@ void forward_convolutional_layer(convolutional_layer l, network_state state)
                 //activate_array(l.output, m*n*l.batch, l.activation);
                 if (l.activation == SWISH) activate_array_swish(l.output, l.outputs*l.batch, l.activation_input, l.output);
                 else if (l.activation == MISH) activate_array_mish(l.output, l.outputs*l.batch, l.activation_input, l.output);
+                else if (l.activation == HARD_MISH) activate_array_hard_mish(l.output, l.outputs*l.batch, l.activation_input, l.output);
                 else if (l.activation == NORM_CHAN) activate_array_normalize_channels(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output);
-                else if (l.activation == NORM_CHAN_SOFTMAX) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output);
+                else if (l.activation == NORM_CHAN_SOFTMAX) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output, 0);
+                else if (l.activation == NORM_CHAN_SOFTMAX_MAXVAL) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output, 1);
                 else activate_array_cpu_custom(l.output, m*n*l.batch, l.activation);
                 return;
 
@@ -1220,7 +1369,7 @@ void forward_convolutional_layer(convolutional_layer l, network_state state)
             else {
                 //printf(" l.index = %d - FP32 \n", l.index);
                 float *im = state.input + (i*l.groups + j)*(l.c / l.groups)*l.h*l.w;
-                if (l.size == 1) {
+                if (l.size == 1 && l.stride == 1 && l.dilation == 1) {
                     b = im;
                 }
                 else {
@@ -1230,7 +1379,7 @@ void forward_convolutional_layer(convolutional_layer l, network_state state)
                         l.c / l.groups,     // input channels
                         l.h, l.w,           // input size (h, w)
                         l.size, l.size,     // kernel size (h, w)
-                        l.pad, l.pad,       // padding (h, w)
+                        l.pad * l.dilation, l.pad * l.dilation,       // padding (h, w)
                         l.stride_y, l.stride_x, // stride (h, w)
                         l.dilation, l.dilation, // dilation (h, w)
                         b);                 // output
@@ -1255,8 +1404,10 @@ void forward_convolutional_layer(convolutional_layer l, network_state state)
     //activate_array(l.output, m*n*l.batch, l.activation);
     if (l.activation == SWISH) activate_array_swish(l.output, l.outputs*l.batch, l.activation_input, l.output);
     else if (l.activation == MISH) activate_array_mish(l.output, l.outputs*l.batch, l.activation_input, l.output);
+    else if (l.activation == HARD_MISH) activate_array_hard_mish(l.output, l.outputs*l.batch, l.activation_input, l.output);
     else if (l.activation == NORM_CHAN) activate_array_normalize_channels(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output);
-    else if (l.activation == NORM_CHAN_SOFTMAX) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output);
+    else if (l.activation == NORM_CHAN_SOFTMAX) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output, 0);
+    else if (l.activation == NORM_CHAN_SOFTMAX_MAXVAL) activate_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.output, 1);
     else activate_array_cpu_custom(l.output, l.outputs*l.batch, l.activation);
 
     if(l.binary || l.xnor) swap_binary(&l);
@@ -1395,7 +1546,8 @@ void backward_convolutional_layer(convolutional_layer l, network_state state)
 
     if (l.activation == SWISH) gradient_array_swish(l.output, l.outputs*l.batch, l.activation_input, l.delta);
     else if (l.activation == MISH) gradient_array_mish(l.outputs*l.batch, l.activation_input, l.delta);
-    else if (l.activation == NORM_CHAN_SOFTMAX) gradient_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.delta);
+    else if (l.activation == HARD_MISH) gradient_array_hard_mish(l.outputs*l.batch, l.activation_input, l.delta);
+    else if (l.activation == NORM_CHAN_SOFTMAX || l.activation == NORM_CHAN_SOFTMAX_MAXVAL) gradient_array_normalize_channels_softmax(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.delta);
     else if (l.activation == NORM_CHAN) gradient_array_normalize_channels(l.output, l.outputs*l.batch, l.batch, l.out_c, l.out_w*l.out_h, l.delta);
     else gradient_array(l.output, l.outputs*l.batch, l.activation, l.delta);
 
@@ -1420,7 +1572,7 @@ void backward_convolutional_layer(convolutional_layer l, network_state state)
                 l.c / l.groups,     // input channels
                 l.h, l.w,           // input size (h, w)
                 l.size, l.size,     // kernel size (h, w)
-                l.pad, l.pad,       // padding (h, w)
+                l.pad * l.dilation, l.pad * l.dilation,       // padding (h, w)
                 l.stride_y, l.stride_x, // stride (h, w)
                 l.dilation, l.dilation, // dilation (h, w)
                 b);                 // output
@@ -1442,7 +1594,7 @@ void backward_convolutional_layer(convolutional_layer l, network_state state)
                     l.c / l.groups,         // input channels (h, w)
                     l.h, l.w,               // input size (h, w)
                     l.size, l.size,         // kernel size (h, w)
-                    l.pad, l.pad,           // padding (h, w)
+                    l.pad * l.dilation, l.pad * l.dilation,           // padding (h, w)
                     l.stride_y, l.stride_x,     // stride (h, w)
                     l.dilation, l.dilation, // dilation (h, w)
                     state.delta + (i*l.groups + j)* (l.c / l.groups)*l.h*l.w); // output (delta)
@@ -1536,4 +1688,3 @@ image *visualize_convolutional_layer(convolutional_layer l, char *window, image 
     free_image(dc);
     return single_weights;
 }
-

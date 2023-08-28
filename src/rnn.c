@@ -69,7 +69,7 @@ float_pair get_rnn_token_data(int *tokens, size_t *offsets, int characters, size
             offsets[i] = (offsets[i] + 1) % len;
 
             if(curr >= characters || curr < 0 || next >= characters || next < 0){
-                error("Bad char");
+                error("Bad char", DARKNET_LOC);
             }
         }
     }
@@ -99,7 +99,7 @@ float_pair get_rnn_data(unsigned char *text, size_t *offsets, int characters, si
                 printf("%ld %d %d %d %d\n", index, j, len, (int)text[index+j], (int)text[index+j+1]);
                 printf("%s", text+index);
                 */
-                error("Bad char");
+                error("Bad char", DARKNET_LOC);
             }
         }
     }
@@ -155,7 +155,10 @@ void train_char_rnn(char *cfgfile, char *weightfile, char *filename, int clear, 
     fprintf(stderr, "Learning Rate: %g, Momentum: %g, Decay: %g\n", net.learning_rate, net.momentum, net.decay);
     int batch = net.batch;
     int steps = net.time_steps;
-    if(clear) *net.seen = 0;
+    if (clear) {
+        *net.seen = 0;
+        *net.cur_iteration = 0;
+    }
     int i = (*net.seen)/net.batch;
 
     int streams = batch/steps;
@@ -357,7 +360,7 @@ void valid_tactic_rnn(char *cfgfile, char *weightfile, char *seed)
     while(c != EOF){
         int next = getc(stdin);
         if(next == EOF) break;
-        if(next < 0 || next >= 255) error("Out of range character");
+        if(next < 0 || next >= 255) error("Out of range character", DARKNET_LOC);
 
         input[c] = 1;
         float *out = network_predict(net, input);
@@ -408,7 +411,7 @@ void valid_char_rnn(char *cfgfile, char *weightfile, char *seed)
     while(c != EOF){
         int next = getc(stdin);
         if(next == EOF) break;
-        if(next < 0 || next >= 255) error("Out of range character");
+        if(next < 0 || next >= 255) error("Out of range character", DARKNET_LOC);
         ++count;
         if(next == ' ' || next == '\n' || next == '\t') ++words;
         input[c] = 1;
