@@ -16,10 +16,12 @@ option(ENABLE_ZED_CAMERA "Enable ZED Camera support" ON)
 option(ENABLE_VCPKG_INTEGRATION "Enable VCPKG integration" OFF)
 option(ENABLE_DEPLOY_CUSTOM_CMAKE_MODULES "Copy custom CMake modules for downstream integration" OFF)
 option(ENABLE_CSHARP_WRAPPER "Enable building a csharp wrapper" OFF)
+option(ENABLE_INSTALLER "Enable building an installer" OFF)
 option(VCPKG_BUILD_OPENCV_WITH_CUDA "Build OpenCV with CUDA extension integration" ON)
 option(VCPKG_USE_OPENCV2 "Use legacy OpenCV 2" OFF)
 option(VCPKG_USE_OPENCV3 "Use legacy OpenCV 3" OFF)
 option(VCPKG_USE_OPENCV4 "Use OpenCV 4" ON)
+option(USE_NSIS "Use NSIS as a CPack backend on Windows" ON)
 
 if(DEFINED ENV{VCPKG_DEFAULT_TRIPLET})
   message(STATUS "Setting default vcpkg target triplet to $ENV{VCPKG_DEFAULT_TRIPLET}")
@@ -161,12 +163,17 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
 endif()
 
-if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-  set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Install prefix" FORCE)
+if(NOT ENABLE_INSTALLER)
+  if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Install prefix" FORCE)
+  endif()
+  set(INSTALL_BIN_DIR      "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Path where exe and dll will be installed")
+  set(INSTALL_LIB_DIR      "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Path where lib will be installed")
+else()
+  set(INSTALL_BIN_DIR      "bin"                       CACHE PATH "Path where exe and dll will be installed")
+  set(INSTALL_LIB_DIR      "lib"                       CACHE PATH "Path where lib will be installed")
 endif()
 
-set(INSTALL_BIN_DIR      "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Path where exe and dll will be installed")
-set(INSTALL_LIB_DIR      "${CMAKE_CURRENT_LIST_DIR}" CACHE PATH "Path where lib will be installed")
 set(INSTALL_INCLUDE_DIR  "include/darknet"           CACHE PATH "Path where headers will be installed")
 set(INSTALL_CMAKE_DIR    "share/darknet"             CACHE PATH "Path where cmake configs will be installed")
 
@@ -383,7 +390,6 @@ else()
   set(ENABLE_ZED_CAMERA "FALSE" CACHE BOOL "Enable ZED Camera support" FORCE)
 endif()
 
-# Make relative paths absolute (needed later on)
 foreach(p LIB BIN INCLUDE CMAKE)
   set(var INSTALL_${p}_DIR)
   if(NOT IS_ABSOLUTE "${${var}}")
@@ -406,7 +412,6 @@ list(APPEND headers
 if(NOT MSVC)
   list(REMOVE_ITEM headers
     ${CMAKE_CURRENT_LIST_DIR}/src/gettimeofday.h
-    ${CMAKE_CURRENT_LIST_DIR}/src/getopt.h
   )
 endif()
 #set(exported_headers ${headers})
@@ -426,8 +431,17 @@ list(REMOVE_ITEM sources
 if(NOT MSVC)
   list(REMOVE_ITEM sources
     ${CMAKE_CURRENT_LIST_DIR}/src/gettimeofday.c
-    ${CMAKE_CURRENT_LIST_DIR}/src/getopt.c
   )
+endif()
+
+if(USE_INTEGRATED_LIBS AND MSVC)
+  list(APPEND sources
+    ${CMAKE_CURRENT_LIST_DIR}/3rdparty/getopt/getopt.c
+    ${CMAKE_CURRENT_LIST_DIR}/3rdparty/getopt/getopt.h
+  )
+endif()
+if((NOT USE_INTEGRATED_LIBS) AND MSVC)
+  find_package(unofficial-getopt-win32 REQUIRED)
 endif()
 
 if(ENABLE_CUDA)
@@ -464,6 +478,9 @@ add_executable(darknet ${CMAKE_CURRENT_LIST_DIR}/src/darknet.c ${sources} ${head
 if(BUILD_AS_CPP)
   set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/darknet.c PROPERTIES LANGUAGE CXX)
   set_target_properties(darknet PROPERTIES LINKER_LANGUAGE CXX)
+endif()
+if(MSVC)
+  target_sources(darknet PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/darknet.rc)
 endif()
 
 add_executable(kmeansiou ${CMAKE_CURRENT_LIST_DIR}/scripts/kmeansiou.c)
@@ -521,6 +538,13 @@ if(MSVC)
   target_link_libraries(dark PUBLIC PThreads4W::PThreads4W)
   target_link_libraries(dark PUBLIC wsock32)
   target_link_libraries(uselib PRIVATE PThreads4W::PThreads4W)
+  if(USE_INTEGRATED_LIBS)
+    target_include_directories(dark PRIVATE ${CMAKE_CURRENT_LIST_DIR}/3rdparty/getopt)
+    target_include_directories(darknet PRIVATE ${CMAKE_CURRENT_LIST_DIR}/3rdparty/getopt)
+  else()
+    target_link_libraries(dark PRIVATE unofficial::getopt-win32::getopt)
+    target_link_libraries(darknet PRIVATE unofficial::getopt-win32::getopt)
+  endif()
   target_compile_definitions(darknet PRIVATE -D_CRT_RAND_S -DNOMINMAX -D_USE_MATH_DEFINES)
   target_compile_definitions(dark PRIVATE -D_CRT_RAND_S -DNOMINMAX -D_USE_MATH_DEFINES)
   target_compile_definitions(dark PUBLIC -D_CRT_SECURE_NO_WARNINGS)
@@ -655,3 +679,43 @@ install(
     PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
     DESTINATION ${INSTALL_BIN_DIR}
 )
+
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json)
+  file(READ ${CMAKE_CURRENT_SOURCE_DIR}/vcpkg.json VCPKG_JSON_STRING)
+  string(JSON CPACK_PACKAGE_NAME GET ${VCPKG_JSON_STRING} name)
+  string(JSON CPACK_PACKAGE_HOMEPAGE_URL GET ${VCPKG_JSON_STRING} homepage)
+  string(JSON CPACK_PACKAGE_DESCRIPTION GET ${VCPKG_JSON_STRING} description)
+  set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
+
+  if(UNIX AND NOT APPLE)
+    find_program(LSB_RELEASE_EXEC lsb_release)
+    execute_process(COMMAND ${LSB_RELEASE_EXEC} -is
+        OUTPUT_VARIABLE LSB_RELEASE_ID_SHORT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(LSB_RELEASE_ID_SHORT STREQUAL "Ubuntu")
+      set(CPACK_GENERATOR "DEB")
+      set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Darknet")
+    else()
+      set(CPACK_GENERATOR "RPM")
+    endif()
+  elseif(APPLE)
+      set(CPACK_GENERATOR "DragNDrop")
+  elseif(WIN32)
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY ${CPACK_PACKAGE_NAME})
+    if(USE_NSIS)
+      set(CPACK_GENERATOR "NSIS")
+      string(JSON CPACK_NSIS_PACKAGE_NAME GET ${VCPKG_JSON_STRING} name)
+      string(JSON CPACK_NSIS_DISPLAY_NAME GET ${VCPKG_JSON_STRING} name)
+      set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL "ON")
+      set(CPACK_NSIS_MODIFY_PATH OFF) #disable extra page for adding to PATH, because it's broken on Win10+ due to NSIS not supporting MAX_PATH
+      set(CPACK_NSIS_MUI_ICON "${CMAKE_CURRENT_SOURCE_DIR}/src/darknet.ico")
+      set(CPACK_NSIS_MUI_UNIICON "${CMAKE_CURRENT_SOURCE_DIR}/src/darknet.ico")
+    else()
+      set(CPACK_GENERATOR "WIX")
+      #set(CPACK_WIX_UPGRADE_GUID "") # IMPORTANT! It has to be unique for every project!!
+    endif()
+  endif()
+
+  include(CPack)
+endif()

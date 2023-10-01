@@ -14,6 +14,7 @@ on:
 
 env:
   VCPKG_BINARY_SOURCES: 'clear;nuget,vcpkgbinarycache,readwrite'
+  VCPKG_FORCE_DOWNLOADED_BINARIES: "TRUE"
 
 jobs:
   ubuntu-makefile:
@@ -86,7 +87,9 @@ jobs:
     - name: Update apt
       run: sudo apt update
     - name: Install dependencies
-      run: sudo apt-get install -y yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+      run: sudo apt-get install -y --no-install-recommends yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+    - name: Clean downloads
+      run: sudo apt-get clean
 
     - name: 'Install CUDA'
       run: ${{ github.workspace }}/scripts/deploy-cuda.sh
@@ -101,7 +104,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         mono $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -124,7 +127,7 @@ jobs:
         CUDA_PATH: "/usr/local/cuda"
         CUDA_TOOLKIT_ROOT_DIR: "/usr/local/cuda"
         LD_LIBRARY_PATH: "/usr/local/cuda/lib64:/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH"
-      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -DoNotUpdateVCPKG -EnableOPENCV -EnableCUDA -EnableCUDNN -DisableInteractive -DoNotUpdateTOOL
+      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -DoNotUpdateVCPKG -EnableOPENCV -EnableCUDA -EnableCUDNN -DisableInteractive -DoNotUpdateTOOL -BuildInstaller
 
     - uses: actions/upload-artifact@v3
       with:
@@ -154,7 +157,9 @@ jobs:
     - name: Update apt
       run: sudo apt update
     - name: Install dependencies
-      run: sudo apt-get install -y yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+      run: sudo apt-get install -y --no-install-recommends yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+    - name: Clean downloads
+      run: sudo apt-get clean
 
     - name: 'Install CUDA'
       run: ${{ github.workspace }}/scripts/deploy-cuda.sh
@@ -205,7 +210,9 @@ jobs:
     - name: Update apt
       run: sudo apt update
     - name: Install dependencies
-      run: sudo apt-get install -y yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+      run: sudo apt-get install -y --no-install-recommends yasm nasm gperf libgles2-mesa-dev libx11-dev libxft-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev libxdamage-dev libxinerama-dev libdbus-1-dev libxtst-dev
+    - name: Clean downloads
+      run: sudo apt-get clean
 
     - name: 'Install CUDA'
       run: ${{ github.workspace }}/scripts/deploy-cuda.sh
@@ -345,6 +352,12 @@ jobs:
       shell: pwsh
       run: ${{ github.workspace }}/build.ps1 -ForceCPP -DisableInteractive -DoNotUpdateTOOL
 
+    - name: Test on data/dog.jpg
+      shell: bash
+      run: >
+        wget https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights -O ${{ github.workspace }}/yolov4-tiny.weights;
+        ${{ github.workspace }}/build_release/darknet detect ${{ github.workspace }}/cfg/yolov4-tiny.cfg ${{ github.workspace }}/yolov4-tiny.weights ${{ github.workspace }}/data/dog.jpg -dont_show
+
 
   ubuntu-setup-sh:
     runs-on: ubuntu-20.04
@@ -354,7 +367,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         mono $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -392,7 +405,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         mono $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -410,7 +423,7 @@ jobs:
 
     - name: 'Build'
       shell: pwsh
-      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -DoNotUpdateVCPKG -EnableOPENCV -DisableInteractive -DoNotUpdateTOOL
+      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -DoNotUpdateVCPKG -EnableOPENCV -DisableInteractive -DoNotUpdateTOOL -BuildInstaller
 
     - uses: actions/upload-artifact@v3
       with:
@@ -488,7 +501,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -506,7 +519,7 @@ jobs:
 
     - name: 'Build'
       shell: pwsh
-      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -ForceLocalVCPKG -DoNotUpdateVCPKG -EnableOPENCV -DisableInteractive -DoNotUpdateTOOL
+      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -ForceLocalVCPKG -DoNotUpdateVCPKG -EnableOPENCV -DisableInteractive -DoNotUpdateTOOL -BuildInstaller
 
     - uses: actions/upload-artifact@v3
       with:
@@ -538,7 +551,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -600,7 +613,7 @@ jobs:
     - name: 'Setup vcpkg and NuGet artifacts backend'
       shell: bash
       run: >
-        git clone https://github.com/microsoft/vcpkg ;
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
         ./vcpkg/bootstrap-vcpkg.sh ;
         $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
         -Name "vcpkgbinarycache"
@@ -621,16 +634,40 @@ jobs:
       run: ${{ github.workspace }}/scripts/setup.ps1 -InstallCUDA
 
 
-  win-intlibs-cpp:
+  win-vcpkg-base-cpp:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v3
 
     - uses: lukka/get-cmake@latest
 
+    - name: 'Setup vcpkg and NuGet artifacts backend'
+      shell: bash
+      run: >
+        git clone --depth 1 https://github.com/microsoft/vcpkg ;
+        ./vcpkg/bootstrap-vcpkg.sh ;
+        $(./vcpkg/vcpkg fetch nuget | tail -n 1) sources add
+        -Name "vcpkgbinarycache"
+        -Source http://93.49.111.10:5555/v3/index.json
+
+    - name: Setup NuGet API key if found
+      shell: bash
+      env:
+        BAGET_API_KEY: ${{ secrets.BAGET_API_KEY }}
+      if: env.BAGET_API_KEY != null
+      run: >
+        $(./vcpkg/vcpkg fetch nuget | tail -n 1)
+        setapikey ${{ secrets.BAGET_API_KEY }}
+        -Source http://93.49.111.10:5555/v3/index.json
+
     - name: 'Build'
       shell: pwsh
-      run: ${{ github.workspace }}/build.ps1 -ForceCPP -DisableInteractive -DoNotUpdateTOOL
+      run: ${{ github.workspace }}/build.ps1 -UseVCPKG -ForceLocalVCPKG -DoNotUpdateVCPKG -ForceCPP -DisableInteractive -DoNotUpdateTOOL
+
+    - name: Download yolov4-tiny.weights
+      run: curl.exe -L https://github.com/AlexeyAB/darknet/releases/download/darknet_yolo_v4_pre/yolov4-tiny.weights -o ${{ github.workspace }}\yolov4-tiny.weights
+    - name: Test on data/dog.jpg
+      run: ${{ github.workspace }}\build_release\darknet.exe detect ${{ github.workspace }}\cfg\yolov4-tiny.cfg ${{ github.workspace }}\yolov4-tiny.weights ${{ github.workspace }}\data\dog.jpg
 
 
   win-csharp:
